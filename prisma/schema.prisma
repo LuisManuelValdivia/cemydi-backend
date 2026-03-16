@@ -1,0 +1,141 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DATABASE_DIRECT_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  nombre    String
+  correo    String   @unique
+  password  String
+  telefono  String?
+  direccion String?
+  rol       Rol      @default(CLIENT)
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  reviews   Review[] @relation("UserReviews")
+  approvedReviews Review[] @relation("ApprovedByAdmin")
+
+  @@map("users")
+}
+
+model Product {
+  id                 Int      @id @default(autoincrement())
+  nombre             String
+  marca              String
+  modelo             String
+  descripcion        String
+  precio             Float
+  clasificacion      String
+  stock              Int
+  proveedor          String
+  tipoAdquisicion    TipoAdquisicion
+  requiereReceta     Boolean  @default(false)
+  activo             Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  promotions         Promotion[]
+  reviews            Review[]
+
+  @@map("products")
+}
+
+model Promotion {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  descripcion String
+  startAt   DateTime
+  endAt     DateTime
+  imageUrl  String?
+  createdAt DateTime @default(now())
+
+  @@map("promotions")
+}
+
+model Brand {
+  id        Int      @id @default(autoincrement())
+  nombre    String   @unique
+  createdAt DateTime @default(now())
+
+  @@map("brands")
+}
+
+model Classification {
+  id        Int      @id @default(autoincrement())
+  nombre    String   @unique
+  createdAt DateTime @default(now())
+
+  @@map("classifications")
+}
+
+model Supplier {
+  id         Int      @id @default(autoincrement())
+  nombre     String   @unique
+  encargado  String
+  repartidor String
+  direccion  String
+  createdAt  DateTime @default(now())
+
+  @@map("suppliers")
+}
+
+model Review {
+  id           Int          @id @default(autoincrement())
+  productId    Int
+  userId       Int
+  rating       Int
+  comment      String
+  status       ReviewStatus @default(PENDING)
+  approvedById Int?
+  approvedAt   DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  product      Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user         User         @relation("UserReviews", fields: [userId], references: [id], onDelete: Cascade)
+  approvedBy   User?        @relation("ApprovedByAdmin", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@unique([userId, productId])
+  @@index([status])
+  @@index([productId])
+  @@index([userId])
+  @@map("reviews")
+}
+
+model BackupRecord {
+  id        Int      @id @default(autoincrement())
+  fileName  String   @map("fileName")
+  content   Bytes
+  sizeBytes Int      @map("sizeBytes")
+  createdAt DateTime @default(now()) @map("createdAt")
+
+  @@index([createdAt])
+  @@map("database_backups")
+}
+
+enum Rol {
+  ADMIN
+  CLIENT
+}
+
+enum TipoAdquisicion {
+  VENTA
+  RENTA
+  MIXTO
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
