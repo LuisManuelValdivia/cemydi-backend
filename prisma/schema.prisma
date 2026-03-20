@@ -26,6 +26,8 @@ model User {
   createdAt DateTime @default(now())
   reviews   Review[] @relation("UserReviews")
   approvedReviews Review[] @relation("ApprovedByAdmin")
+  sessions  UserSession[]
+  loginAttempts LoginAttempt[]
 
   @@map("users")
 }
@@ -115,12 +117,54 @@ model Review {
 model BackupRecord {
   id        Int      @id @default(autoincrement())
   fileName  String   @map("fileName")
-  content   Bytes
   sizeBytes Int      @map("sizeBytes")
   createdAt DateTime @default(now()) @map("createdAt")
 
   @@index([createdAt])
   @@map("database_backups")
+}
+
+model BackupSchedule {
+  id           Int       @id @default(1)
+  isEnabled    Boolean   @default(false) @map("isEnabled")
+  intervalDays Int       @default(1) @map("intervalDays")
+  runAtTime    String    @default("03:00") @map("runAtTime")
+  retentionDays Int      @default(7) @map("retentionDays")
+  lastRunAt    DateTime? @map("lastRunAt")
+  nextRunAt    DateTime? @map("nextRunAt")
+  createdAt    DateTime  @default(now()) @map("createdAt")
+  updatedAt    DateTime  @updatedAt @map("updatedAt")
+
+  @@map("database_backup_schedule")
+}
+
+model UserSession {
+  id         String   @id @default(cuid())
+  tokenId    String   @unique @map("tokenId")
+  userId     Int      @map("userId")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @map("createdAt")
+  expiresAt  DateTime @map("expiresAt")
+  lastSeenAt DateTime @default(now()) @map("lastSeenAt")
+  endedAt    DateTime? @map("endedAt")
+
+  @@index([userId, endedAt, expiresAt])
+  @@index([lastSeenAt])
+  @@map("user_sessions")
+}
+
+model LoginAttempt {
+  id          Int      @id @default(autoincrement())
+  userId      Int?     @map("userId")
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  correo      String
+  success     Boolean
+  reason      String?
+  attemptedAt DateTime @default(now()) @map("attemptedAt")
+
+  @@index([attemptedAt])
+  @@index([success, attemptedAt])
+  @@map("login_attempts")
 }
 
 enum Rol {

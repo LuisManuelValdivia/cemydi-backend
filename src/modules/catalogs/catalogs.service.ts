@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -47,6 +51,48 @@ export class CatalogsService {
     }
   }
 
+  async updateBrand(
+    authorization: string | undefined,
+    id: number,
+    dto: CreateCatalogItemDto,
+  ) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.brand.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('La marca no existe');
+    }
+
+    try {
+      const brand = await this.prisma.brand.update({
+        where: { id },
+        data: { nombre: dto.nombre.trim() },
+      });
+      return {
+        message: 'Marca actualizada correctamente',
+        brand,
+      };
+    } catch (error) {
+      this.throwIfDuplicate(error, 'La marca ya existe');
+      throw error;
+    }
+  }
+
+  async deleteBrand(authorization: string | undefined, id: number) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.brand.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('La marca no existe');
+    }
+
+    await this.prisma.brand.delete({ where: { id } });
+
+    return {
+      message: 'Marca eliminada correctamente',
+    };
+  }
+
   async createClassification(
     authorization: string | undefined,
     dto: CreateCatalogItemDto,
@@ -65,6 +111,52 @@ export class CatalogsService {
       this.throwIfDuplicate(error, 'La clasificacion ya existe');
       throw error;
     }
+  }
+
+  async updateClassification(
+    authorization: string | undefined,
+    id: number,
+    dto: CreateCatalogItemDto,
+  ) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.classification.findUnique({
+      where: { id },
+    });
+    if (!existing) {
+      throw new NotFoundException('La clasificacion no existe');
+    }
+
+    try {
+      const classification = await this.prisma.classification.update({
+        where: { id },
+        data: { nombre: dto.nombre.trim() },
+      });
+      return {
+        message: 'Clasificacion actualizada correctamente',
+        classification,
+      };
+    } catch (error) {
+      this.throwIfDuplicate(error, 'La clasificacion ya existe');
+      throw error;
+    }
+  }
+
+  async deleteClassification(authorization: string | undefined, id: number) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.classification.findUnique({
+      where: { id },
+    });
+    if (!existing) {
+      throw new NotFoundException('La clasificacion no existe');
+    }
+
+    await this.prisma.classification.delete({ where: { id } });
+
+    return {
+      message: 'Clasificacion eliminada correctamente',
+    };
   }
 
   private throwIfDuplicate(error: unknown, message: string) {

@@ -7,6 +7,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Put,
   Res,
 } from '@nestjs/common';
 import type { Response } from 'express';
@@ -30,8 +31,48 @@ export class BackupsController {
     @Headers('authorization') authorization: string | undefined,
     @Res() response: Response,
   ) {
-    const backups = await this.backupsService.listDatabaseBackupRecords(authorization);
+    const backups =
+      await this.backupsService.listDatabaseBackupRecords(authorization);
     response.status(200).json({ backups });
+  }
+
+  @Get('database/schedule')
+  async getDatabaseBackupSchedule(
+    @Headers('authorization') authorization: string | undefined,
+    @Res() response: Response,
+  ) {
+    const schedule =
+      await this.backupsService.getDatabaseBackupSchedule(authorization);
+    response.status(200).json({ schedule });
+  }
+
+  @Put('database/schedule')
+  async updateDatabaseBackupSchedule(
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: Record<string, unknown>,
+    @Res() response: Response,
+  ) {
+    const schedule = await this.backupsService.updateDatabaseBackupSchedule(
+      authorization,
+      body,
+    );
+    response.status(200).json({
+      schedule,
+      message: 'Programacion de respaldos actualizada correctamente',
+    });
+  }
+
+  @Delete('database/schedule')
+  async deleteDatabaseBackupSchedule(
+    @Headers('authorization') authorization: string | undefined,
+    @Res() response: Response,
+  ) {
+    const schedule =
+      await this.backupsService.deleteDatabaseBackupSchedule(authorization);
+    response.status(200).json({
+      schedule,
+      message: 'Programacion automatica eliminada correctamente',
+    });
   }
 
   @Post('database')
@@ -39,10 +80,12 @@ export class BackupsController {
     @Headers('authorization') authorization: string | undefined,
     @Res() response: Response,
   ) {
-    const backup = await this.backupsService.createDatabaseBackupRecord(authorization);
-    response
-      .status(201)
-      .json({ backup, message: 'Respaldo generado y registrado correctamente' });
+    const backup =
+      await this.backupsService.createDatabaseBackupRecord(authorization);
+    response.status(201).json({
+      backup,
+      message: 'Respaldo generado y registrado correctamente',
+    });
   }
 
   @Post('database/table')
@@ -55,9 +98,10 @@ export class BackupsController {
       authorization,
       tableName,
     );
-    response
-      .status(201)
-      .json({ backup, message: 'Respaldo de tabla generado y registrado correctamente' });
+    response.status(201).json({
+      backup,
+      message: 'Respaldo de tabla generado y registrado correctamente',
+    });
   }
 
   @Get('database/:id/download')
@@ -66,7 +110,10 @@ export class BackupsController {
     @Param('id', ParseIntPipe) id: number,
     @Res() response: Response,
   ) {
-    const backup = await this.backupsService.getDatabaseBackupRecord(authorization, id);
+    const backup = await this.backupsService.getDatabaseBackupRecord(
+      authorization,
+      id,
+    );
 
     response.setHeader('Content-Type', 'application/x-tar');
     response.setHeader(
@@ -81,7 +128,8 @@ export class BackupsController {
     @Headers('authorization') authorization: string | undefined,
     @Res() response: Response,
   ) {
-    const backup = await this.backupsService.createDatabaseBackup(authorization);
+    const backup =
+      await this.backupsService.createDatabaseBackup(authorization);
 
     response.setHeader('Content-Type', 'application/x-tar');
     response.setHeader(
@@ -97,7 +145,12 @@ export class BackupsController {
     @Param('id', ParseIntPipe) id: number,
     @Res() response: Response,
   ) {
-    const backup = await this.backupsService.deleteDatabaseBackupRecord(authorization, id);
-    response.status(200).json({ backup, message: 'Respaldo eliminado correctamente' });
+    const backup = await this.backupsService.deleteDatabaseBackupRecord(
+      authorization,
+      id,
+    );
+    response
+      .status(200)
+      .json({ backup, message: 'Respaldo eliminado correctamente' });
   }
 }

@@ -1,8 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
+  Param,
+  ParseIntPipe,
+  Patch,
   Post,
   UsePipes,
   ValidationPipe,
@@ -28,11 +32,45 @@ export class CatalogsController {
     return this.catalogsService.createBrand(authorization, dto);
   }
 
+  @Patch('brands/:id')
+  updateBrand(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCatalogItemDto,
+  ) {
+    return this.catalogsService.updateBrand(authorization, id, dto);
+  }
+
+  @Delete('brands/:id')
+  deleteBrand(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.catalogsService.deleteBrand(authorization, id);
+  }
+
   @Post('classifications')
   createClassification(
     @Headers('authorization') authorization: string | undefined,
     @Body() dto: CreateCatalogItemDto,
   ) {
     return this.catalogsService.createClassification(authorization, dto);
+  }
+
+  @Patch('classifications/:id')
+  updateClassification(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCatalogItemDto,
+  ) {
+    return this.catalogsService.updateClassification(authorization, id, dto);
+  }
+
+  @Delete('classifications/:id')
+  deleteClassification(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.catalogsService.deleteClassification(authorization, id);
   }
 }

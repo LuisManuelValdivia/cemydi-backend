@@ -9,10 +9,12 @@ async function bootstrap() {
     .filter(Boolean);
 
   app.enableCors({
-    origin: configuredOrigins.length === 1 ? configuredOrigins[0] : configuredOrigins,
+    origin:
+      configuredOrigins.length === 1 ? configuredOrigins[0] : configuredOrigins,
     credentials: true,
   });
 
   await app.listen(process.env.PORT ?? 4000);
 }
-bootstrap();
+
+void bootstrap();

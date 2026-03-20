@@ -43,6 +43,14 @@ $ npm install
    - `JWT_EXPIRES_IN`
    - `PORT`
    - `CORS_ORIGIN` (single URL or comma-separated list)
+5. Configure backup storage in Google Drive with OAuth 2.0:
+   - `GOOGLE_DRIVE_FOLDER_ID`
+   - `GOOGLE_OAUTH_CLIENT_ID`
+   - `GOOGLE_OAUTH_CLIENT_SECRET`
+   - `GOOGLE_OAUTH_REDIRECT_URI`
+   - `GOOGLE_OAUTH_REFRESH_TOKEN`
+
+Use `npm run drive:oauth:url` to generate the consent URL and `npm run drive:oauth:token -- YOUR_AUTHORIZATION_CODE` to exchange the authorization code for tokens. Store the returned `refresh_token` in `.env` and share the destination folder with the same Google account that completed the consent flow.
 
 Prisma reads both values directly from `.env`:
 

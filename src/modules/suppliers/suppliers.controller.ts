@@ -1,8 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
+  Param,
+  ParseIntPipe,
+  Patch,
   Post,
   UsePipes,
   ValidationPipe,
@@ -26,5 +30,22 @@ export class SuppliersController {
     @Body() dto: CreateSupplierDto,
   ) {
     return this.suppliersService.create(authorization, dto);
+  }
+
+  @Patch(':id')
+  update(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateSupplierDto,
+  ) {
+    return this.suppliersService.update(authorization, id, dto);
+  }
+
+  @Delete(':id')
+  delete(
+    @Headers('authorization') authorization: string | undefined,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.suppliersService.delete(authorization, id);
   }
 }

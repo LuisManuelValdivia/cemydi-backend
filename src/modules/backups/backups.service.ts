@@ -2,10 +2,15 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { JwtService } from '@nestjs/jwt';
+import { google } from 'googleapis';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   extractBearerToken,
@@ -20,6 +25,36 @@ type BackupRecordSummary = {
   createdAt: string;
 };
 
+type BackupRecordRow = {
+  id: number;
+  fileName: string;
+  sizeBytes: number | bigint | string;
+  createdAt: Date | string;
+};
+
+type BackupScheduleSummary = {
+  enabled: boolean;
+  everyDays: number;
+  runAtTime: string;
+  retentionDays: number;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type BackupScheduleRow = {
+  id: number;
+  isEnabled: boolean;
+  intervalDays: number | bigint | string;
+  runAtTime: string;
+  retentionDays: number | bigint | string;
+  lastRunAt: Date | string | null;
+  nextRunAt: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+};
+
 type ParsedDatabaseUrl = {
   host: string;
   port: string;
@@ -31,17 +66,45 @@ type ParsedDatabaseUrl = {
 };
 
 @Injectable()
-export class BackupsService {
+export class BackupsService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(BackupsService.name);
+  private readonly scheduleDefaults = {
+    enabled: false,
+    everyDays: 1,
+    runAtTime: '03:00',
+    retentionDays: 7,
+  } as const;
+  private readonly scheduleRowId = 1;
+  private readonly schedulerPollMs = 60_000;
+  private readonly retentionPollMs = 60 * 60 * 1000;
+
+  private schedulerTimer: NodeJS.Timeout | null = null;
+  private schedulerInProgress = false;
+  private lastRetentionSweepAt = 0;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
   ) {}
 
+  onModuleInit() {
+    this.schedulerTimer = setInterval(() => {
+      void this.runAutomationTick();
+    }, this.schedulerPollMs);
+
+    void this.runAutomationTick();
+  }
+
+  onModuleDestroy() {
+    if (this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+  }
+
   async createDatabaseBackupRecord(authorization: string | undefined) {
     this.ensureAdmin(authorization);
-
-    const backup = await this.buildDatabaseBackupPayload();
-    return this.insertBackupRecord(backup);
+    return this.createAndStoreDatabaseBackupRecord();
   }
 
   async createSingleTableBackupRecord(
@@ -49,9 +112,7 @@ export class BackupsService {
     tableName: string,
   ) {
     this.ensureAdmin(authorization);
-
-    const backup = await this.buildSingleTableBackupPayload(tableName);
-    return this.insertBackupRecord(backup);
+    return this.createAndStoreSingleTableBackupRecord(tableName);
   }
 
   async listDatabaseBackupRecords(authorization: string | undefined) {
@@ -73,22 +134,155 @@ export class BackupsService {
     return rows.map((item) => this.mapBackupRecordSummary(item));
   }
 
-  async getDatabaseBackupRecord(
+  async getDatabaseBackupSchedule(authorization: string | undefined) {
+    this.ensureAdmin(authorization);
+    const row = await this.getOrCreateBackupScheduleRow();
+    return this.mapBackupScheduleSummary(row);
+  }
+
+  async updateDatabaseBackupSchedule(
     authorization: string | undefined,
-    id: number,
+    payload: Record<string, unknown>,
   ) {
     this.ensureAdmin(authorization);
 
-    const rows = await this.prisma.$queryRaw<
-      Array<{
-        id: number;
-        fileName: string;
-        content: Buffer | Uint8Array | string;
-        sizeBytes: number | bigint | string;
-        createdAt: Date | string;
-      }>
-    >`
-      SELECT "id", "fileName", "content", "sizeBytes", "createdAt"
+    const existing = await this.getOrCreateBackupScheduleRow();
+    const normalized = this.normalizeSchedulePayload(payload);
+    const nextRunAt = normalized.enabled
+      ? this.computeNextRunAt(
+          new Date(),
+          normalized.everyDays,
+          normalized.runAtTime,
+          this.parseOptionalDate(existing.lastRunAt),
+        )
+      : null;
+    const now = new Date();
+
+    const updatedRows: unknown = await this.prisma.$queryRaw<unknown[]>`
+      INSERT INTO "database_backup_schedule" (
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (
+        ${this.scheduleRowId},
+        ${normalized.enabled},
+        ${normalized.everyDays},
+        ${normalized.runAtTime},
+        ${normalized.retentionDays},
+        ${this.parseOptionalDate(existing.lastRunAt)},
+        ${nextRunAt},
+        ${this.parseOptionalDate(existing.createdAt) ?? now},
+        ${now}
+      )
+      ON CONFLICT ("id") DO UPDATE
+      SET
+        "isEnabled" = EXCLUDED."isEnabled",
+        "intervalDays" = EXCLUDED."intervalDays",
+        "runAtTime" = EXCLUDED."runAtTime",
+        "retentionDays" = EXCLUDED."retentionDays",
+        "lastRunAt" = EXCLUDED."lastRunAt",
+        "nextRunAt" = EXCLUDED."nextRunAt",
+        "updatedAt" = EXCLUDED."updatedAt"
+      RETURNING
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+    `;
+
+    const updated = this.getBackupScheduleRow(this.toUnknownArray(updatedRows));
+    if (!updated) {
+      throw new InternalServerErrorException(
+        'No se pudo guardar la programacion de respaldos',
+      );
+    }
+
+    await this.applyRetentionPolicy(updated.retentionDays);
+    void this.runAutomationTick();
+
+    return this.mapBackupScheduleSummary(updated);
+  }
+
+  async deleteDatabaseBackupSchedule(authorization: string | undefined) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.getOrCreateBackupScheduleRow();
+    const now = new Date();
+
+    const resetRows: unknown = await this.prisma.$queryRaw<unknown[]>`
+      INSERT INTO "database_backup_schedule" (
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (
+        ${this.scheduleRowId},
+        ${this.scheduleDefaults.enabled},
+        ${this.scheduleDefaults.everyDays},
+        ${this.scheduleDefaults.runAtTime},
+        ${this.scheduleDefaults.retentionDays},
+        ${null},
+        ${null},
+        ${this.parseOptionalDate(existing.createdAt) ?? now},
+        ${now}
+      )
+      ON CONFLICT ("id") DO UPDATE
+      SET
+        "isEnabled" = EXCLUDED."isEnabled",
+        "intervalDays" = EXCLUDED."intervalDays",
+        "runAtTime" = EXCLUDED."runAtTime",
+        "retentionDays" = EXCLUDED."retentionDays",
+        "lastRunAt" = EXCLUDED."lastRunAt",
+        "nextRunAt" = EXCLUDED."nextRunAt",
+        "updatedAt" = EXCLUDED."updatedAt"
+      RETURNING
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+    `;
+
+    const reset = this.getBackupScheduleRow(this.toUnknownArray(resetRows));
+    if (!reset) {
+      throw new InternalServerErrorException(
+        'No se pudo eliminar la programacion automatica de respaldos',
+      );
+    }
+
+    await this.applyRetentionPolicy(reset.retentionDays);
+    void this.runAutomationTick();
+
+    return this.mapBackupScheduleSummary(reset);
+  }
+
+  async getDatabaseBackupRecord(authorization: string | undefined, id: number) {
+    this.ensureAdmin(authorization);
+
+    const rows = await this.prisma.$queryRaw<BackupRecordRow[]>`
+      SELECT "id", "fileName", "sizeBytes", "createdAt"
       FROM "database_backups"
       WHERE "id" = ${id}
       LIMIT 1
@@ -101,14 +295,14 @@ export class BackupsService {
 
     return {
       ...this.mapBackupRecordSummary(record),
-      content: this.toBuffer(record.content),
+      content: await this.downloadBackupFromDrive(record.fileName),
     };
   }
 
   async createDatabaseBackup(authorization: string | undefined) {
     this.ensureAdmin(authorization);
 
-    const backup = await this.buildDatabaseBackupPayload();
+    const backup = await this.buildDirectDatabaseBackupPayload();
 
     return {
       fileName: backup.fileName,
@@ -122,35 +316,414 @@ export class BackupsService {
   ) {
     this.ensureAdmin(authorization);
 
-    const deletedRows = await this.prisma.$queryRaw<
-      Array<{
-        id: number;
-        fileName: string;
-        sizeBytes: number | bigint | string;
-        createdAt: Date | string;
-      }>
-    >`
-      DELETE FROM "database_backups"
+    const existingRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
+      SELECT "id", "fileName", "sizeBytes", "createdAt"
+      FROM "database_backups"
       WHERE "id" = ${id}
-      RETURNING "id", "fileName", "sizeBytes", "createdAt"
+      LIMIT 1
     `;
 
-    const deleted = deletedRows[0];
-    if (!deleted) {
+    const existing = existingRows[0];
+    if (!existing) {
       throw new NotFoundException('Respaldo no encontrado');
     }
 
+    const deleted = await this.deleteBackupRecordAssets(existing);
     return this.mapBackupRecordSummary(deleted);
+  }
+
+  private async createAndStoreDatabaseBackupRecord() {
+    const backup = await this.buildDatabaseBackupPayload();
+    let record: BackupRecordSummary;
+
+    try {
+      record = await this.insertBackupRecord(backup);
+    } catch (error) {
+      await this.tryDeleteUploadedBackupSilently(backup.fileName);
+      throw error;
+    }
+
+    await this.applyRetentionPolicy();
+    return record;
+  }
+
+  private async createAndStoreSingleTableBackupRecord(tableName: string) {
+    const backup = await this.buildSingleTableBackupPayload(tableName);
+    let record: BackupRecordSummary;
+
+    try {
+      record = await this.insertBackupRecord(backup);
+    } catch (error) {
+      await this.tryDeleteUploadedBackupSilently(backup.fileName);
+      throw error;
+    }
+
+    await this.applyRetentionPolicy();
+    return record;
+  }
+
+  private async runAutomationTick() {
+    if (this.schedulerInProgress) {
+      return;
+    }
+
+    this.schedulerInProgress = true;
+
+    try {
+      const schedule = await this.getOrCreateBackupScheduleRow();
+      const now = new Date();
+
+      await this.ensurePersistedNextRunAt(schedule, now);
+
+      if (schedule.isEnabled) {
+        const dueAt = this.parseOptionalDate(schedule.nextRunAt);
+        if (dueAt && dueAt.getTime() <= now.getTime()) {
+          this.logger.log(
+            `Iniciando respaldo automatico programado para ${schedule.runAtTime} cada ${this.toSafeNumber(schedule.intervalDays)} dia(s)`,
+          );
+
+          const createdBackup = await this.createAndStoreDatabaseBackupRecord();
+          const executedAt = new Date(createdBackup.createdAt);
+          const refreshedSchedule = await this.getOrCreateBackupScheduleRow();
+          const nextRunAt = this.computeNextRunAt(
+            executedAt,
+            this.toSafeNumber(refreshedSchedule.intervalDays),
+            refreshedSchedule.runAtTime,
+            executedAt,
+          );
+
+          await this.updateScheduleExecutionDates(
+            refreshedSchedule.id,
+            executedAt,
+            nextRunAt,
+          );
+
+          this.logger.log(
+            `Respaldo automatico completado: ${createdBackup.fileName}`,
+          );
+        }
+      }
+
+      if (now.getTime() - this.lastRetentionSweepAt >= this.retentionPollMs) {
+        await this.applyRetentionPolicy(
+          this.toSafeNumber(schedule.retentionDays),
+        );
+        this.lastRetentionSweepAt = now.getTime();
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Error desconocido en el programador';
+      this.logger.error(
+        `No se pudo ejecutar el programador de respaldos: ${message}`,
+      );
+    } finally {
+      this.schedulerInProgress = false;
+    }
+  }
+
+  private async ensurePersistedNextRunAt(
+    schedule: BackupScheduleRow,
+    now: Date,
+  ) {
+    if (!schedule.isEnabled) {
+      if (schedule.nextRunAt) {
+        await this.updateScheduleExecutionDates(
+          schedule.id,
+          this.parseOptionalDate(schedule.lastRunAt),
+          null,
+        );
+      }
+      return;
+    }
+
+    const nextRunAt = this.parseOptionalDate(schedule.nextRunAt);
+    if (nextRunAt) {
+      return;
+    }
+
+    const computedNextRunAt = this.computeNextRunAt(
+      now,
+      this.toSafeNumber(schedule.intervalDays),
+      schedule.runAtTime,
+      this.parseOptionalDate(schedule.lastRunAt),
+    );
+
+    await this.updateScheduleExecutionDates(
+      schedule.id,
+      this.parseOptionalDate(schedule.lastRunAt),
+      computedNextRunAt,
+    );
+  }
+
+  private async updateScheduleExecutionDates(
+    id: number,
+    lastRunAt: Date | null,
+    nextRunAt: Date | null,
+  ) {
+    await this.prisma.$queryRaw`
+      UPDATE "database_backup_schedule"
+      SET
+        "lastRunAt" = ${lastRunAt},
+        "nextRunAt" = ${nextRunAt},
+        "updatedAt" = ${new Date()}
+      WHERE "id" = ${id}
+    `;
+  }
+
+  private async getOrCreateBackupScheduleRow(): Promise<BackupScheduleRow> {
+    const existingRows: unknown = await this.prisma.$queryRaw<unknown[]>`
+      SELECT
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+      FROM "database_backup_schedule"
+      WHERE "id" = ${this.scheduleRowId}
+      LIMIT 1
+    `;
+
+    const existing = this.getBackupScheduleRow(
+      this.toUnknownArray(existingRows),
+    );
+    if (existing) {
+      return existing;
+    }
+
+    const now = new Date();
+    const createdRows: unknown = await this.prisma.$queryRaw<unknown[]>`
+      INSERT INTO "database_backup_schedule" (
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (
+        ${this.scheduleRowId},
+        ${this.scheduleDefaults.enabled},
+        ${this.scheduleDefaults.everyDays},
+        ${this.scheduleDefaults.runAtTime},
+        ${this.scheduleDefaults.retentionDays},
+        ${null},
+        ${null},
+        ${now},
+        ${now}
+      )
+      ON CONFLICT ("id") DO NOTHING
+      RETURNING
+        "id",
+        "isEnabled",
+        "intervalDays",
+        "runAtTime",
+        "retentionDays",
+        "lastRunAt",
+        "nextRunAt",
+        "createdAt",
+        "updatedAt"
+    `;
+
+    return (
+      this.getBackupScheduleRow(this.toUnknownArray(createdRows)) ??
+      this.getOrCreateBackupScheduleRow()
+    );
+  }
+
+  private mapBackupScheduleSummary(
+    row: BackupScheduleRow,
+  ): BackupScheduleSummary {
+    return {
+      enabled: row.isEnabled,
+      everyDays: this.toSafeNumber(row.intervalDays),
+      runAtTime: row.runAtTime,
+      retentionDays: this.toSafeNumber(row.retentionDays),
+      lastRunAt: this.toIsoString(row.lastRunAt),
+      nextRunAt: this.toIsoString(row.nextRunAt),
+      createdAt: this.toIsoString(row.createdAt) ?? new Date().toISOString(),
+      updatedAt: this.toIsoString(row.updatedAt) ?? new Date().toISOString(),
+    };
+  }
+
+  private normalizeSchedulePayload(payload: Record<string, unknown>) {
+    return {
+      enabled: this.normalizeBoolean(
+        payload.enabled,
+        'activar los respaldos automaticos',
+      ),
+      everyDays: this.normalizePositiveInteger(
+        payload.everyDays,
+        'la frecuencia en dias',
+        365,
+      ),
+      runAtTime: this.normalizeTimeValue(payload.runAtTime),
+      retentionDays: this.normalizePositiveInteger(
+        payload.retentionDays,
+        'la retencion de respaldos',
+        3650,
+      ),
+    };
+  }
+
+  private normalizeBoolean(value: unknown, fieldLabel: string) {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['true', '1', 'si', 'yes'].includes(normalized)) {
+        return true;
+      }
+
+      if (['false', '0', 'no'].includes(normalized)) {
+        return false;
+      }
+    }
+
+    throw new BadRequestException(`Valor invalido para ${fieldLabel}`);
+  }
+
+  private normalizePositiveInteger(
+    value: unknown,
+    fieldLabel: string,
+    maxValue: number,
+  ) {
+    const rawValue =
+      typeof value === 'string'
+        ? value.trim()
+        : typeof value === 'number'
+          ? value
+          : NaN;
+    const parsed = Number(rawValue);
+
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxValue) {
+      throw new BadRequestException(
+        `Valor invalido para ${fieldLabel}. Debe ser un entero entre 1 y ${maxValue}`,
+      );
+    }
+
+    return parsed;
+  }
+
+  private normalizeTimeValue(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException(
+        'La hora programada debe tener formato HH:mm en horario de 24 horas',
+      );
+    }
+
+    const normalized = value.trim();
+
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(normalized)) {
+      throw new BadRequestException(
+        'La hora programada debe tener formato HH:mm en horario de 24 horas',
+      );
+    }
+
+    return normalized;
+  }
+
+  private computeNextRunAt(
+    now: Date,
+    everyDays: number,
+    runAtTime: string,
+    lastRunAt?: Date | null,
+  ) {
+    if (lastRunAt) {
+      const nextRunAt = this.buildDateAtTime(lastRunAt, runAtTime);
+      nextRunAt.setDate(nextRunAt.getDate() + everyDays);
+
+      while (nextRunAt.getTime() <= now.getTime()) {
+        nextRunAt.setDate(nextRunAt.getDate() + everyDays);
+      }
+
+      return nextRunAt;
+    }
+
+    const nextRunAt = this.buildDateAtTime(now, runAtTime);
+    if (nextRunAt.getTime() <= now.getTime()) {
+      nextRunAt.setDate(nextRunAt.getDate() + everyDays);
+    }
+
+    return nextRunAt;
+  }
+
+  private buildDateAtTime(baseDate: Date, runAtTime: string) {
+    const [hours, minutes] = runAtTime.split(':').map((value) => Number(value));
+    const scheduledDate = new Date(baseDate);
+    scheduledDate.setHours(hours, minutes, 0, 0);
+    return scheduledDate;
+  }
+
+  private async applyRetentionPolicy(
+    retentionDaysOverride?: number | bigint | string,
+  ) {
+    const retentionDays =
+      retentionDaysOverride !== undefined
+        ? this.toSafeNumber(retentionDaysOverride)
+        : this.toSafeNumber(
+            (await this.getOrCreateBackupScheduleRow()).retentionDays,
+          );
+
+    if (retentionDays < 1) {
+      return 0;
+    }
+
+    const cutoffDate = new Date(
+      Date.now() - retentionDays * 24 * 60 * 60 * 1000,
+    );
+    const expiredBackups = await this.prisma.$queryRaw<BackupRecordRow[]>`
+      SELECT "id", "fileName", "sizeBytes", "createdAt"
+      FROM "database_backups"
+      WHERE "createdAt" < ${cutoffDate}
+      ORDER BY "createdAt" ASC, "id" ASC
+    `;
+
+    let deletedCount = 0;
+
+    for (const backup of expiredBackups) {
+      try {
+        await this.deleteBackupRecordAssets(backup);
+        deletedCount += 1;
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Error desconocido al aplicar retencion';
+        this.logger.warn(
+          `No se pudo eliminar el respaldo vencido ${backup.fileName}: ${message}`,
+        );
+      }
+    }
+
+    if (deletedCount > 0) {
+      this.logger.log(
+        `Se eliminaron ${deletedCount} respaldo(s) vencidos por retencion automatica`,
+      );
+    }
+
+    return deletedCount;
   }
 
   private async buildDatabaseBackupPayload() {
     const now = new Date();
     const fileName = this.createBackupFileName(now);
     const content = await this.runPgDump();
+    await this.uploadBackupToDrive(fileName, content);
 
     return {
       fileName,
-      content,
+      sizeBytes: content.length,
       createdAt: now,
     };
   }
@@ -166,11 +739,20 @@ export class BackupsService {
     const now = new Date();
     const fileName = this.createTableBackupFileName(now, tableName);
     const content = await this.runPgDump(tableName);
+    await this.uploadBackupToDrive(fileName, content);
 
     return {
       fileName,
-      content,
+      sizeBytes: content.length,
       createdAt: now,
+    };
+  }
+
+  private async buildDirectDatabaseBackupPayload() {
+    const now = new Date();
+    return {
+      fileName: this.createBackupFileName(now),
+      content: await this.runPgDump(),
     };
   }
 
@@ -208,23 +790,12 @@ export class BackupsService {
     const hour = String(date.getHours()).padStart(2, '0');
     const minute = String(date.getMinutes()).padStart(2, '0');
     const second = String(date.getSeconds()).padStart(2, '0');
+    const millisecond = String(date.getMilliseconds()).padStart(3, '0');
 
     return {
       date: `${year}${month}${day}`,
-      time: `${hour}${minute}${second}`,
+      time: `${hour}${minute}${second}${millisecond}`,
     };
-  }
-
-  private toBuffer(value: Buffer | Uint8Array | string) {
-    if (Buffer.isBuffer(value)) {
-      return value;
-    }
-
-    if (value instanceof Uint8Array) {
-      return Buffer.from(value);
-    }
-
-    return Buffer.from(value, 'base64');
   }
 
   async getDatabaseStatus(authorization: string | undefined) {
@@ -332,7 +903,10 @@ export class BackupsService {
     });
 
     const totalRows = tableStats.reduce((acc, item) => acc + item.rowCount, 0);
-    const totalTableBytes = tableStats.reduce((acc, item) => acc + item.sizeBytes, 0);
+    const totalTableBytes = tableStats.reduce(
+      (acc, item) => acc + item.sizeBytes,
+      0,
+    );
 
     return {
       checkedAt: new Date().toISOString(),
@@ -360,6 +934,7 @@ export class BackupsService {
       backup: {
         format: 'application/x-tar',
         fileExtension: '.tar',
+        provider: 'google-drive-oauth2',
       },
     };
   }
@@ -372,19 +947,12 @@ export class BackupsService {
 
   private async insertBackupRecord(backup: {
     fileName: string;
-    content: Buffer;
+    sizeBytes: number;
     createdAt: Date;
   }) {
-    const createdRows = await this.prisma.$queryRaw<
-      Array<{
-        id: number;
-        fileName: string;
-        sizeBytes: number | bigint | string;
-        createdAt: Date | string;
-      }>
-    >`
-      INSERT INTO "database_backups" ("fileName", "content", "sizeBytes", "createdAt")
-      VALUES (${backup.fileName}, ${backup.content}, ${backup.content.length}, ${backup.createdAt})
+    const createdRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
+      INSERT INTO "database_backups" ("fileName", "sizeBytes", "createdAt")
+      VALUES (${backup.fileName}, ${backup.sizeBytes}, ${backup.createdAt})
       RETURNING "id", "fileName", "sizeBytes", "createdAt"
     `;
 
@@ -394,6 +962,48 @@ export class BackupsService {
     }
 
     return this.mapBackupRecordSummary(created);
+  }
+
+  private async deleteBackupRecordAssets(record: BackupRecordRow) {
+    const deletedRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
+      DELETE FROM "database_backups"
+      WHERE "id" = ${record.id}
+      RETURNING "id", "fileName", "sizeBytes", "createdAt"
+    `;
+
+    const deleted = deletedRows[0];
+    if (!deleted) {
+      throw new NotFoundException('Respaldo no encontrado');
+    }
+
+    try {
+      await this.deleteBackupFromDrive(deleted.fileName);
+      return deleted;
+    } catch (error) {
+      await this.restoreBackupRecord(deleted);
+      throw error;
+    }
+  }
+
+  private async restoreBackupRecord(record: BackupRecordRow) {
+    await this.prisma.$queryRaw`
+      INSERT INTO "database_backups" ("id", "fileName", "sizeBytes", "createdAt")
+      VALUES (${record.id}, ${record.fileName}, ${this.toSafeNumber(record.sizeBytes)}, ${this.parseOptionalDate(record.createdAt) ?? new Date()})
+    `;
+  }
+
+  private async tryDeleteUploadedBackupSilently(fileName: string) {
+    try {
+      await this.deleteBackupFromDrive(fileName);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Error desconocido al revertir respaldo en Google Drive';
+      this.logger.warn(
+        `No se pudo revertir el archivo ${fileName} en Google Drive tras un error local: ${message}`,
+      );
+    }
   }
 
   private async listBackupTableNames() {
@@ -414,10 +1024,14 @@ export class BackupsService {
   }
 
   private normalizeTableName(tableName: string) {
-    const normalized = String(tableName ?? '').trim().toLowerCase();
+    const normalized = String(tableName ?? '')
+      .trim()
+      .toLowerCase();
 
     if (!normalized) {
-      throw new BadRequestException('Selecciona una tabla para generar el respaldo');
+      throw new BadRequestException(
+        'Selecciona una tabla para generar el respaldo',
+      );
     }
 
     if (!/^[a-z][a-z0-9_]*$/.test(normalized)) {
@@ -428,20 +1042,27 @@ export class BackupsService {
   }
 
   private parseDatabaseUrl(): ParsedDatabaseUrl & { schema: string } {
-    const rawDatabaseUrl = process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL;
+    const rawDatabaseUrl =
+      process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL;
     if (!rawDatabaseUrl) {
-      throw new InternalServerErrorException('DATABASE_URL no esta configurada');
+      throw new InternalServerErrorException(
+        'DATABASE_URL no esta configurada',
+      );
     }
 
     let parsed: URL;
     try {
       parsed = new URL(rawDatabaseUrl);
     } catch {
-      throw new InternalServerErrorException('DATABASE_URL tiene un formato invalido');
+      throw new InternalServerErrorException(
+        'DATABASE_URL tiene un formato invalido',
+      );
     }
 
     if (!['postgresql:', 'postgres:'].includes(parsed.protocol)) {
-      throw new InternalServerErrorException('DATABASE_URL debe apuntar a PostgreSQL');
+      throw new InternalServerErrorException(
+        'DATABASE_URL debe apuntar a PostgreSQL',
+      );
     }
 
     const database = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
@@ -454,7 +1075,9 @@ export class BackupsService {
     }
 
     if (!this.isSafeIdentifier(schema)) {
-      throw new InternalServerErrorException('El schema de DATABASE_URL es invalido');
+      throw new InternalServerErrorException(
+        'El schema de DATABASE_URL es invalido',
+      );
     }
 
     const sslMode = this.normalizeSslMode(parsed.searchParams.get('sslmode'));
@@ -481,6 +1104,267 @@ export class BackupsService {
     }
 
     return process.platform === 'win32' ? 'pg_dump.exe' : 'pg_dump';
+  }
+
+  private createGoogleDriveClient() {
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+    const redirectUri =
+      process.env.GOOGLE_OAUTH_REDIRECT_URI?.trim() ||
+      'http://127.0.0.1:3005/oauth2callback';
+    const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim();
+
+    if (!clientId || !clientSecret || !refreshToken) {
+      throw new InternalServerErrorException(
+        'Configura GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET y GOOGLE_OAUTH_REFRESH_TOKEN para usar respaldos en Google Drive con OAuth 2.0',
+      );
+    }
+
+    const auth = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+    auth.setCredentials({
+      refresh_token: refreshToken,
+    });
+
+    return google.drive({
+      version: 'v3',
+      auth,
+    });
+  }
+
+  private getGoogleDriveFolderId() {
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID?.trim();
+    if (!folderId) {
+      throw new InternalServerErrorException(
+        'Configura GOOGLE_DRIVE_FOLDER_ID para guardar respaldos en Google Drive',
+      );
+    }
+
+    return folderId;
+  }
+
+  private async uploadBackupToDrive(fileName: string, content: Buffer) {
+    const drive = this.createGoogleDriveClient();
+    const folderId = this.getGoogleDriveFolderId();
+
+    try {
+      await drive.files.create({
+        requestBody: {
+          name: fileName,
+          parents: [folderId],
+        },
+        media: {
+          mimeType: 'application/x-tar',
+          body: Readable.from(content),
+        },
+        supportsAllDrives: true,
+      });
+    } catch (error) {
+      throw this.wrapGoogleDriveError(
+        error,
+        'No se pudo subir el respaldo a Google Drive',
+      );
+    }
+  }
+
+  private async downloadBackupFromDrive(fileName: string) {
+    const drive = this.createGoogleDriveClient();
+    const driveFileId = await this.findDriveFileIdByName(fileName);
+    if (!driveFileId) {
+      throw new NotFoundException(
+        `No se encontro el respaldo ${fileName} dentro de la carpeta de Google Drive configurada`,
+      );
+    }
+
+    try {
+      const response = (await drive.files.get(
+        {
+          fileId: driveFileId,
+          alt: 'media',
+          supportsAllDrives: true,
+        },
+        {
+          responseType: 'stream',
+        },
+      )) as { data: NodeJS.ReadableStream };
+
+      return await this.readStreamToBuffer(response.data);
+    } catch (error) {
+      const wrapped = this.wrapGoogleDriveError(
+        error,
+        `No se pudo descargar el respaldo ${fileName} desde Google Drive`,
+      );
+
+      if (this.isGoogleDriveFileMissing(error)) {
+        throw new NotFoundException(
+          'El archivo del respaldo ya no existe en Google Drive',
+        );
+      }
+
+      throw wrapped;
+    }
+  }
+
+  private async deleteBackupFromDrive(fileName: string) {
+    const drive = this.createGoogleDriveClient();
+    const driveFileId = await this.findDriveFileIdByName(fileName, {
+      allowMissing: true,
+    });
+
+    if (!driveFileId) {
+      return;
+    }
+
+    try {
+      await drive.files.delete({
+        fileId: driveFileId,
+        supportsAllDrives: true,
+      });
+    } catch (error) {
+      if (this.isGoogleDriveFileMissing(error)) {
+        return;
+      }
+
+      throw this.wrapGoogleDriveError(
+        error,
+        'No se pudo eliminar el respaldo en Google Drive',
+      );
+    }
+  }
+
+  private async readStreamToBuffer(stream: NodeJS.ReadableStream) {
+    return new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+
+      stream.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+
+      stream.on('end', () => {
+        resolve(Buffer.concat(chunks));
+      });
+
+      stream.on('error', (error) => {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : 'Error desconocido al leer el archivo';
+        reject(
+          new InternalServerErrorException(
+            `No se pudo leer el archivo de Google Drive: ${errorMessage}`,
+          ),
+        );
+      });
+    });
+  }
+
+  private toUnknownArray(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+  }
+
+  private getBackupScheduleRow(rows: unknown[]): BackupScheduleRow | null {
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const candidate = rows[0];
+    if (!candidate || typeof candidate !== 'object') {
+      return null;
+    }
+
+    const row = candidate as Partial<BackupScheduleRow>;
+    if (
+      typeof row.id !== 'number' ||
+      typeof row.isEnabled !== 'boolean' ||
+      typeof row.runAtTime !== 'string'
+    ) {
+      return null;
+    }
+
+    return row as BackupScheduleRow;
+  }
+
+  private async findDriveFileIdByName(
+    fileName: string,
+    options?: { allowMissing?: boolean },
+  ) {
+    const drive = this.createGoogleDriveClient();
+    const folderId = this.getGoogleDriveFolderId();
+
+    try {
+      const response = await drive.files.list({
+        q: [
+          `'${folderId}' in parents`,
+          `name = '${this.escapeDriveQueryValue(fileName)}'`,
+          'trashed = false',
+        ].join(' and '),
+        pageSize: 1,
+        fields: 'files(id, name, createdTime)',
+        orderBy: 'createdTime desc',
+        includeItemsFromAllDrives: true,
+        supportsAllDrives: true,
+      });
+
+      const fileId = response.data.files?.[0]?.id?.trim();
+      if (fileId) {
+        return fileId;
+      }
+
+      if (options?.allowMissing) {
+        return null;
+      }
+
+      throw new NotFoundException(
+        `No se encontro el respaldo ${fileName} dentro de la carpeta de Google Drive configurada`,
+      );
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+
+      throw this.wrapGoogleDriveError(
+        error,
+        `No se pudo ubicar el respaldo ${fileName} en Google Drive`,
+      );
+    }
+  }
+
+  private escapeDriveQueryValue(value: string) {
+    return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
+
+  private isGoogleDriveFileMissing(error: unknown) {
+    return (
+      error instanceof NotFoundException ||
+      this.extractGoogleDriveStatus(error) === 404
+    );
+  }
+
+  private extractGoogleDriveStatus(error: unknown) {
+    if (!error || typeof error !== 'object') {
+      return undefined;
+    }
+
+    const candidate = error as {
+      code?: number;
+      status?: number;
+      response?: { status?: number };
+    };
+
+    return candidate.code ?? candidate.status ?? candidate.response?.status;
+  }
+
+  private wrapGoogleDriveError(error: unknown, fallbackMessage: string) {
+    if (error instanceof InternalServerErrorException) {
+      return error;
+    }
+
+    if (error instanceof Error && error.message.trim()) {
+      return new InternalServerErrorException(
+        `${fallbackMessage}: ${error.message.trim()}`,
+      );
+    }
+
+    return new InternalServerErrorException(fallbackMessage);
   }
 
   private isSafeIdentifier(value: string) {
@@ -536,10 +1420,7 @@ export class BackupsService {
     }
 
     if (tableName) {
-      args.push(
-        '--table',
-        `${databaseConfig.schema}.${tableName}`,
-      );
+      args.push('--table', `${databaseConfig.schema}.${tableName}`);
     }
 
     return new Promise<Buffer>((resolve, reject) => {
@@ -550,7 +1431,9 @@ export class BackupsService {
         env: {
           ...process.env,
           PGPASSWORD: databaseConfig.password,
-          ...(databaseConfig.sslMode ? { PGSSLMODE: databaseConfig.sslMode } : {}),
+          ...(databaseConfig.sslMode
+            ? { PGSSLMODE: databaseConfig.sslMode }
+            : {}),
           ...(databaseConfig.channelBinding
             ? { PGCHANNELBINDING: databaseConfig.channelBinding }
             : {}),
@@ -599,14 +1482,31 @@ export class BackupsService {
           return;
         }
 
-        const stderrMessage = Buffer.concat(stderrChunks).toString('utf8').trim();
+        const stderrMessage = Buffer.concat(stderrChunks)
+          .toString('utf8')
+          .trim();
         reject(
           new InternalServerErrorException(
-            stderrMessage || `pg_dump finalizo con codigo ${code ?? 'desconocido'}`,
+            stderrMessage ||
+              `pg_dump finalizo con codigo ${code ?? 'desconocido'}`,
           ),
         );
       });
     });
+  }
+
+  private parseOptionalDate(value: Date | string | null | undefined) {
+    if (!value) {
+      return null;
+    }
+
+    const parsed = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  private toIsoString(value: Date | string | null | undefined) {
+    const parsed = this.parseOptionalDate(value);
+    return parsed ? parsed.toISOString() : null;
   }
 
   private toSafeNumber(value: bigint | number | string | undefined) {
@@ -632,7 +1532,10 @@ export class BackupsService {
     }
 
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    const exponent = Math.min(
+      Math.floor(Math.log(bytes) / Math.log(1024)),
+      units.length - 1,
+    );
     const value = bytes / 1024 ** exponent;
     return `${value.toFixed(exponent === 0 ? 0 : 2)} ${units[exponent]}`;
   }

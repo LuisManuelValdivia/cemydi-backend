@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -53,6 +57,60 @@ export class SuppliersService {
 
       throw error;
     }
+  }
+
+  async update(
+    authorization: string | undefined,
+    id: number,
+    dto: CreateSupplierDto,
+  ) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.supplier.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('El proveedor no existe');
+    }
+
+    try {
+      const supplier = await this.prisma.supplier.update({
+        where: { id },
+        data: {
+          nombre: dto.nombre.trim(),
+          encargado: dto.encargado.trim(),
+          repartidor: dto.repartidor.trim(),
+          direccion: dto.direccion.trim(),
+        },
+      });
+
+      return {
+        message: 'Proveedor actualizado correctamente',
+        supplier,
+      };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new BadRequestException('El proveedor ya existe');
+      }
+
+      throw error;
+    }
+  }
+
+  async delete(authorization: string | undefined, id: number) {
+    this.ensureAdmin(authorization);
+
+    const existing = await this.prisma.supplier.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException('El proveedor no existe');
+    }
+
+    await this.prisma.supplier.delete({ where: { id } });
+
+    return {
+      message: 'Proveedor eliminado correctamente',
+    };
   }
 
   private ensureAdmin(authorization: string | undefined) {
