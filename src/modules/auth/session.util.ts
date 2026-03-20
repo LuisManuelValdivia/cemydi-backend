@@ -3,10 +3,11 @@ import { JwtService } from '@nestjs/jwt';
 import { Rol } from '@prisma/client';
 import { jwtConstants } from './constants';
 
-type SessionPayload = {
+export type SessionPayload = {
   sub: number;
   correo: string;
   rol: Rol;
+  sid?: string;
 };
 
 export function extractBearerToken(authorization: string | undefined) {

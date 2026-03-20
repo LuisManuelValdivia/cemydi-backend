@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { Prisma, TipoAdquisicion } from '@prisma/client';
+import { type Product, Prisma, TipoAdquisicion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   extractBearerToken,
@@ -77,14 +77,16 @@ export class ProductsService {
 
     const parsedPage = Number(query.pageRaw ?? '');
     const parsedPageSize = Number(query.pageSizeRaw ?? '');
-    const paginationRequested = query.pageRaw !== undefined || query.pageSizeRaw !== undefined;
-    const pageSize = Number.isInteger(parsedPageSize) && parsedPageSize > 0
-      ? Math.min(parsedPageSize, 60)
-      : 9;
+    const paginationRequested =
+      query.pageRaw !== undefined || query.pageSizeRaw !== undefined;
+    const pageSize =
+      Number.isInteger(parsedPageSize) && parsedPageSize > 0
+        ? Math.min(parsedPageSize, 60)
+        : 9;
     const requestedPage =
       Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
 
-    let products;
+    let products: Product[] = [];
     let total = 0;
     let page = 1;
     let totalPages = 1;
@@ -125,10 +127,12 @@ export class ProductsService {
     ]);
 
     const clasificaciones = Array.from(
-      new Set([
-        ...catalogClassifications.map((item) => item.nombre.trim()),
-        ...productClassifications.map((item) => item.clasificacion.trim()),
-      ].filter(Boolean)),
+      new Set(
+        [
+          ...catalogClassifications.map((item) => item.nombre.trim()),
+          ...productClassifications.map((item) => item.clasificacion.trim()),
+        ].filter(Boolean),
+      ),
     ).sort((a, b) => a.localeCompare(b, 'es', { sensitivity: 'base' }));
 
     return {
