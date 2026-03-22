@@ -34,12 +34,16 @@ export class AuthController {
   }
 
   @Post('login')
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
     const result = await this.authService.login(dto);
     res.cookie(
       AUTH_ACCESS_COOKIE,
       result.accessToken,
-      buildAuthCookieSetOptions(result.cookieMaxAgeMs),
+      buildAuthCookieSetOptions(result.cookieMaxAgeMs, req),
     );
     return { user: result.user };
   }
@@ -47,7 +51,7 @@ export class AuthController {
   @Post('logout')
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const token = this.extractAccessToken(req);
-    res.clearCookie(AUTH_ACCESS_COOKIE, buildAuthCookieClearOptions());
+    res.clearCookie(AUTH_ACCESS_COOKIE, buildAuthCookieClearOptions(req));
     await this.authService.tryLogoutWithToken(token);
     return {
       message: 'Sesion cerrada correctamente',

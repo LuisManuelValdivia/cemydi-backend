@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import type { CookieOptions } from 'express';
+import type { CookieOptions, Request } from 'express';
 import type { SignOptions } from 'jsonwebtoken';
 
 const rawSecret = process.env.JWT_SECRET?.trim();
@@ -29,10 +29,43 @@ function parseBooleanEnv(value: string | undefined) {
   return null;
 }
 
-function shouldUseSecureCookies() {
+function isSecureRequest(req?: Request) {
+  const forwardedProto = req?.headers['x-forwarded-proto'];
+  const forwardedProtoValue = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : forwardedProto;
+
+  if (typeof forwardedProtoValue === 'string') {
+    const normalizedProto = forwardedProtoValue.split(',')[0]?.trim().toLowerCase();
+    if (normalizedProto === 'https') {
+      return true;
+    }
+  }
+
+  if (req?.secure) {
+    return true;
+  }
+
+  const originHeader = req?.headers.origin;
+  if (typeof originHeader === 'string') {
+    try {
+      return new URL(originHeader).protocol === 'https:';
+    } catch {
+      // Ignorar origen invalido y seguir con la deteccion por configuracion.
+    }
+  }
+
+  return false;
+}
+
+function shouldUseSecureCookies(req?: Request) {
   const explicitSecure = parseBooleanEnv(process.env.AUTH_COOKIE_SECURE);
   if (explicitSecure !== null) {
     return explicitSecure;
+  }
+
+  if (isSecureRequest(req)) {
+    return true;
   }
 
   const configuredOrigins = (process.env.CORS_ORIGIN ?? '')
@@ -54,11 +87,11 @@ function shouldUseSecureCookies() {
   });
 }
 
-function authCookieBase(): Pick<
+function authCookieBase(req?: Request): Pick<
   CookieOptions,
   'httpOnly' | 'secure' | 'sameSite' | 'path'
 > {
-  const secureCookies = shouldUseSecureCookies();
+  const secureCookies = shouldUseSecureCookies(req);
 
   return {
     httpOnly: true,
@@ -68,12 +101,12 @@ function authCookieBase(): Pick<
   };
 }
 
-export function buildAuthCookieSetOptions(maxAgeMs: number): CookieOptions {
-  return { ...authCookieBase(), maxAge: maxAgeMs };
+export function buildAuthCookieSetOptions(maxAgeMs: number, req?: Request): CookieOptions {
+  return { ...authCookieBase(req), maxAge: maxAgeMs };
 }
 
-export function buildAuthCookieClearOptions(): CookieOptions {
-  return authCookieBase();
+export function buildAuthCookieClearOptions(req?: Request): CookieOptions {
+  return authCookieBase(req);
 }
 
 export const jwtConstants = {
