@@ -3,26 +3,15 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
 import { CreateCatalogItemDto } from './dto/create-catalog-item.dto';
 
 @Injectable()
 export class CatalogsService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async findAll() {
     const [brands, classifications] = await Promise.all([
       this.prisma.brand.findMany({ orderBy: { nombre: 'asc' } }),
       this.prisma.classification.findMany({ orderBy: { nombre: 'asc' } }),
@@ -31,12 +20,7 @@ export class CatalogsService {
     return { brands, classifications };
   }
 
-  async createBrand(
-    authorization: string | undefined,
-    dto: CreateCatalogItemDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async createBrand(dto: CreateCatalogItemDto) {
     try {
       const brand = await this.prisma.brand.create({
         data: { nombre: dto.nombre.trim() },
@@ -51,13 +35,7 @@ export class CatalogsService {
     }
   }
 
-  async updateBrand(
-    authorization: string | undefined,
-    id: number,
-    dto: CreateCatalogItemDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async updateBrand(id: number, dto: CreateCatalogItemDto) {
     const existing = await this.prisma.brand.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException('La marca no existe');
@@ -78,9 +56,7 @@ export class CatalogsService {
     }
   }
 
-  async deleteBrand(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async deleteBrand(id: number) {
     const existing = await this.prisma.brand.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException('La marca no existe');
@@ -93,12 +69,7 @@ export class CatalogsService {
     };
   }
 
-  async createClassification(
-    authorization: string | undefined,
-    dto: CreateCatalogItemDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async createClassification(dto: CreateCatalogItemDto) {
     try {
       const classification = await this.prisma.classification.create({
         data: { nombre: dto.nombre.trim() },
@@ -113,13 +84,7 @@ export class CatalogsService {
     }
   }
 
-  async updateClassification(
-    authorization: string | undefined,
-    id: number,
-    dto: CreateCatalogItemDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async updateClassification(id: number, dto: CreateCatalogItemDto) {
     const existing = await this.prisma.classification.findUnique({
       where: { id },
     });
@@ -142,9 +107,7 @@ export class CatalogsService {
     }
   }
 
-  async deleteClassification(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async deleteClassification(id: number) {
     const existing = await this.prisma.classification.findUnique({
       where: { id },
     });
@@ -166,11 +129,5 @@ export class CatalogsService {
     ) {
       throw new BadRequestException(message);
     }
-  }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
   }
 }

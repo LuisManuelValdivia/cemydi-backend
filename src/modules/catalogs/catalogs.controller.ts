@@ -3,74 +3,66 @@ import {
   Controller,
   Delete,
   Get,
-  Headers,
   Param,
   ParseIntPipe,
   Patch,
   Post,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import { Rol } from '@prisma/client';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateCatalogItemDto } from './dto/create-catalog-item.dto';
 import { CatalogsService } from './catalogs.service';
 
 @Controller('catalogs')
+@Roles(Rol.ADMIN)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class CatalogsController {
   constructor(private readonly catalogsService: CatalogsService) {}
 
   @Get()
-  findAll(@Headers('authorization') authorization: string | undefined) {
-    return this.catalogsService.findAll(authorization);
+  findAll() {
+    return this.catalogsService.findAll();
   }
 
   @Post('brands')
-  createBrand(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() dto: CreateCatalogItemDto,
-  ) {
-    return this.catalogsService.createBrand(authorization, dto);
+  createBrand(@Body() dto: CreateCatalogItemDto) {
+    return this.catalogsService.createBrand(dto);
   }
 
   @Patch('brands/:id')
   updateBrand(
-    @Headers('authorization') authorization: string | undefined,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: CreateCatalogItemDto,
   ) {
-    return this.catalogsService.updateBrand(authorization, id, dto);
+    return this.catalogsService.updateBrand(id, dto);
   }
 
   @Delete('brands/:id')
-  deleteBrand(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
-    return this.catalogsService.deleteBrand(authorization, id);
+  deleteBrand(@Param('id', ParseIntPipe) id: number) {
+    return this.catalogsService.deleteBrand(id);
   }
 
   @Post('classifications')
-  createClassification(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() dto: CreateCatalogItemDto,
-  ) {
-    return this.catalogsService.createClassification(authorization, dto);
+  createClassification(@Body() dto: CreateCatalogItemDto) {
+    return this.catalogsService.createClassification(dto);
   }
 
   @Patch('classifications/:id')
   updateClassification(
-    @Headers('authorization') authorization: string | undefined,
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: CreateCatalogItemDto,
   ) {
-    return this.catalogsService.updateClassification(authorization, id, dto);
+    return this.catalogsService.updateClassification(id, dto);
   }
 
   @Delete('classifications/:id')
-  deleteClassification(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
-    return this.catalogsService.deleteClassification(authorization, id);
+  deleteClassification(@Param('id', ParseIntPipe) id: number) {
+    return this.catalogsService.deleteClassification(id);
   }
 }

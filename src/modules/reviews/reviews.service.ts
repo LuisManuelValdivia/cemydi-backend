@@ -4,22 +4,14 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Prisma, ReviewStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
+import type { AuthUser } from '../auth/auth-user.interface';
 import { CreateReviewDto } from './dto/create-review.dto';
 
 @Injectable()
 export class ReviewsService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async listApprovedByProduct(productId: number) {
     const reviews = await this.prisma.review.findMany({
@@ -57,11 +49,9 @@ export class ReviewsService {
     };
   }
 
-  async submit(authorization: string | undefined, dto: CreateReviewDto) {
-    const payload = this.getSessionPayload(authorization);
-
+  async submit(currentUser: AuthUser, dto: CreateReviewDto) {
     const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
+      where: { id: currentUser.sub },
       select: { id: true, activo: true },
     });
 
@@ -81,7 +71,7 @@ export class ReviewsService {
     const existingReview = await this.prisma.review.findUnique({
       where: {
         userId_productId: {
-          userId: payload.sub,
+          userId: currentUser.sub,
           productId: dto.productId,
         },
       },
@@ -99,13 +89,13 @@ export class ReviewsService {
     const review = await this.prisma.review.upsert({
       where: {
         userId_productId: {
-          userId: payload.sub,
+          userId: currentUser.sub,
           productId: dto.productId,
         },
       },
       create: {
         productId: dto.productId,
-        userId: payload.sub,
+        userId: currentUser.sub,
         rating: ratingToPersist,
         comment: dto.comment.trim(),
         status,
@@ -130,13 +120,11 @@ export class ReviewsService {
     };
   }
 
-  async getMyByProduct(authorization: string | undefined, productId: number) {
-    const payload = this.getSessionPayload(authorization);
-
+  async getMyByProduct(currentUser: AuthUser, productId: number) {
     const review = await this.prisma.review.findUnique({
       where: {
         userId_productId: {
-          userId: payload.sub,
+          userId: currentUser.sub,
           productId,
         },
       },
@@ -147,12 +135,7 @@ export class ReviewsService {
     };
   }
 
-  async listForAdmin(
-    authorization: string | undefined,
-    params: { status?: string; userId?: number },
-  ) {
-    this.ensureAdmin(authorization);
-
+  async listForAdmin(params: { status?: string; userId?: number }) {
     const where: Prisma.ReviewWhereInput = {};
 
     if (params.status && params.status !== 'ALL') {
@@ -201,16 +184,14 @@ export class ReviewsService {
     return { reviews };
   }
 
-  async approve(authorization: string | undefined, id: number) {
-    const payload = this.ensureAdmin(authorization);
-
+  async approve(currentUser: AuthUser, id: number) {
     try {
       const review = await this.prisma.review.update({
         where: { id },
         data: {
           status: ReviewStatus.APPROVED,
           approvedAt: new Date(),
-          approvedById: payload.sub,
+          approvedById: currentUser.sub,
         },
         include: {
           product: {
@@ -252,9 +233,7 @@ export class ReviewsService {
     }
   }
 
-  async remove(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async remove(id: number) {
     try {
       await this.prisma.review.delete({
         where: { id },
@@ -271,17 +250,6 @@ export class ReviewsService {
 
       throw error;
     }
-  }
-
-  private getSessionPayload(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    return verifySessionToken(this.jwtService, token);
-  }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const payload = this.getSessionPayload(authorization);
-    requireAdminRole(payload);
-    return payload;
   }
 
   private toClientReview(review: {

@@ -2,15 +2,11 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { type Product, Prisma, TipoAdquisicion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
+import type { AuthUser } from '../auth/auth-user.interface';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 
@@ -26,12 +22,9 @@ type FindProductsQuery = {
 
 @Injectable()
 export class ProductsService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(query: FindProductsQuery, authorization: string | undefined) {
+  async findAll(query: FindProductsQuery, user?: AuthUser) {
     const andFilters: Prisma.ProductWhereInput[] = [];
     const validTipos = query.tipos.filter(
       (value): value is TipoAdquisicion =>
@@ -39,7 +32,7 @@ export class ProductsService {
     );
 
     if (query.includeInactive) {
-      this.ensureAdmin(authorization);
+      this.ensureAdmin(user);
     } else {
       andFilters.push({ activo: true });
     }
@@ -154,12 +147,12 @@ export class ProductsService {
   async findOne(
     id: number,
     includeInactive: boolean,
-    authorization: string | undefined,
+    user?: AuthUser,
   ) {
     const where: Prisma.ProductWhereInput = { id };
 
     if (includeInactive) {
-      this.ensureAdmin(authorization);
+      this.ensureAdmin(user);
     } else {
       where.activo = true;
     }
@@ -173,9 +166,7 @@ export class ProductsService {
     return { product };
   }
 
-  async create(authorization: string | undefined, dto: CreateProductDto) {
-    this.ensureAdmin(authorization);
-
+  async create(dto: CreateProductDto) {
     const product = await this.prisma.product.create({
       data: {
         nombre: dto.nombre.trim(),
@@ -198,13 +189,7 @@ export class ProductsService {
     };
   }
 
-  async update(
-    authorization: string | undefined,
-    id: number,
-    dto: UpdateProductDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async update(id: number, dto: UpdateProductDto) {
     const data: Prisma.ProductUpdateInput = {};
 
     if (dto.nombre !== undefined) data.nombre = dto.nombre.trim();
@@ -254,9 +239,7 @@ export class ProductsService {
     }
   }
 
-  async remove(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async remove(id: number) {
     try {
       await this.prisma.product.delete({ where: { id } });
       return { message: 'Producto eliminado correctamente' };
@@ -272,9 +255,13 @@ export class ProductsService {
     }
   }
 
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
+  private ensureAdmin(user?: AuthUser) {
+    if (!user) {
+      throw new UnauthorizedException('No autenticado');
+    }
+
+    if (user.rol !== 'ADMIN') {
+      throw new UnauthorizedException('No tienes permisos de administrador');
+    }
   }
 }

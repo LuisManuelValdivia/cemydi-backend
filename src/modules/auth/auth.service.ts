@@ -9,13 +9,9 @@ import { Prisma, Rol } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import type { AuthUser } from './auth-user.interface';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from './session.util';
 
 type PublicUser = {
   id: number;
@@ -166,19 +162,29 @@ export class AuthService {
     });
 
     return {
-      access_token: accessToken,
+      accessToken,
       user: this.serializeUser(user),
+      cookieMaxAgeMs: Math.max(0, expiresAt.getTime() - now.getTime()),
     };
   }
 
-  async logout(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
+  async tryLogoutWithToken(token: string | null | undefined): Promise<void> {
+    if (!token?.trim()) {
+      return;
+    }
+    try {
+      const payload = this.jwtService.verify<AuthUser>(token);
+      await this.logout(payload);
+    } catch {
+      /* token invalido o expirado */
+    }
+  }
 
-    if (payload.sid) {
+  async logout(user: AuthUser) {
+    if (user.sid) {
       await this.prisma.userSession.updateMany({
         where: {
-          tokenId: payload.sid,
+          tokenId: user.sid,
           endedAt: null,
         },
         data: {
@@ -194,15 +200,14 @@ export class AuthService {
   }
 
   async getSecurityOverview(
-    authorization: string | undefined,
+    user: AuthUser,
   ): Promise<{ overview: SecurityOverviewResponse }> {
-    const payload = this.ensureAdmin(authorization);
     const now = new Date();
 
-    if (payload.sid) {
+    if (user.sid) {
       await this.prisma.userSession.updateMany({
         where: {
-          tokenId: payload.sid,
+          tokenId: user.sid,
           endedAt: null,
         },
         data: {
@@ -371,14 +376,6 @@ export class AuthService {
       .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
       .join(' ');
   }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
-    return payload;
-  }
-
   private isMissingTrackingTableError(error: unknown) {
     return (
       error instanceof Prisma.PrismaClientKnownRequestError &&

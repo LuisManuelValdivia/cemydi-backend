@@ -3,15 +3,22 @@ import {
   Controller,
   Delete,
   Get,
-  Headers,
   Param,
   ParseIntPipe,
   Patch,
   Post,
   Query,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import { Rol } from '@prisma/client';
+import type { AuthUser } from '../auth/auth-user.interface';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ProductsService } from './products.service';
@@ -22,6 +29,7 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get()
+  @UseGuards(OptionalJwtAuthGuard)
   findAll(
     @Query('search') search: string | undefined,
     @Query('clasificaciones') clasificacionesRaw: string | undefined,
@@ -30,7 +38,7 @@ export class ProductsController {
     @Query('page') pageRaw: string | undefined,
     @Query('pageSize') pageSizeRaw: string | undefined,
     @Query('includeInactive') includeInactiveRaw: string | undefined,
-    @Headers('authorization') authorization: string | undefined,
+    @CurrentUser() user: AuthUser | undefined,
   ) {
     const clasificaciones = clasificacionesRaw
       ? clasificacionesRaw
@@ -55,45 +63,38 @@ export class ProductsController {
         pageSizeRaw,
         includeInactive: includeInactiveRaw === 'true',
       },
-      authorization,
+      user,
     );
   }
 
   @Get(':id')
+  @UseGuards(OptionalJwtAuthGuard)
   findOne(
     @Param('id', ParseIntPipe) id: number,
     @Query('includeInactive') includeInactiveRaw: string | undefined,
-    @Headers('authorization') authorization: string | undefined,
+    @CurrentUser() user: AuthUser | undefined,
   ) {
-    return this.productsService.findOne(
-      id,
-      includeInactiveRaw === 'true',
-      authorization,
-    );
+    return this.productsService.findOne(id, includeInactiveRaw === 'true', user);
   }
 
   @Post()
-  create(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() dto: CreateProductDto,
-  ) {
-    return this.productsService.create(authorization, dto);
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  create(@Body() dto: CreateProductDto) {
+    return this.productsService.create(dto);
   }
 
   @Patch(':id')
-  update(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: UpdateProductDto,
-  ) {
-    return this.productsService.update(authorization, id, dto);
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProductDto) {
+    return this.productsService.update(id, dto);
   }
 
   @Delete(':id')
-  remove(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
-    return this.productsService.remove(authorization, id);
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  remove(@Param('id', ParseIntPipe) id: number) {
+    return this.productsService.remove(id);
   }
 }

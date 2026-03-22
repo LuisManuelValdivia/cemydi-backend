@@ -2,35 +2,28 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
+import type { AuthUser } from '../auth/auth-user.interface';
 import { CreatePromotionDto, PromotionMode } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
 
 type FindPromotionsParams = {
   includeExpired: boolean;
-  authorization: string | undefined;
+  user?: AuthUser;
 };
 
 @Injectable()
 export class PromotionsService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async findAll(params: FindPromotionsParams) {
     const where: Prisma.PromotionWhereInput = {};
 
     if (params.includeExpired) {
-      this.ensureAdmin(params.authorization);
+      this.ensureAdmin(params.user);
     } else {
       const now = new Date();
       where.startAt = { lte: now };
@@ -61,9 +54,7 @@ export class PromotionsService {
     return { promotions };
   }
 
-  async create(authorization: string | undefined, dto: CreatePromotionDto) {
-    this.ensureAdmin(authorization);
-
+  async create(dto: CreatePromotionDto) {
     const startAt = new Date(dto.startAt);
     const endAt = new Date(dto.endAt);
 
@@ -173,13 +164,7 @@ export class PromotionsService {
     };
   }
 
-  async update(
-    authorization: string | undefined,
-    id: number,
-    dto: UpdatePromotionDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async update(id: number, dto: UpdatePromotionDto) {
     const currentPromotion = await this.prisma.promotion.findUnique({
       where: { id },
       select: {
@@ -284,9 +269,7 @@ export class PromotionsService {
     }
   }
 
-  async remove(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async remove(id: number) {
     try {
       await this.prisma.promotion.delete({ where: { id } });
       return { message: 'Promocion eliminada correctamente' };
@@ -302,9 +285,13 @@ export class PromotionsService {
     }
   }
 
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
+  private ensureAdmin(user?: AuthUser) {
+    if (!user) {
+      throw new UnauthorizedException('No autenticado');
+    }
+
+    if (user.rol !== 'ADMIN') {
+      throw new UnauthorizedException('No tienes permisos de administrador');
+    }
   }
 }
