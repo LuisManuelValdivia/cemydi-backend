@@ -28,6 +28,11 @@ import { UsersService } from './users.service';
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  @Get('me')
+  getMe(@CurrentUser() user: AuthUser) {
+    return this.usersService.getMe(user);
+  }
+
   @Get()
   @Roles(Rol.ADMIN)
   findAll() {

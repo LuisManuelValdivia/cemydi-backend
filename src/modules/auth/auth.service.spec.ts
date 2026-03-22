@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { AuthService } from './auth.service';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../../prisma/prisma.service';
 
 describe('AuthService', () => {
@@ -16,6 +17,7 @@ describe('AuthService', () => {
             user: {},
             userSession: {},
             loginAttempt: {},
+            authToken: {},
             $transaction: jest.fn(),
           },
         },
@@ -25,6 +27,13 @@ describe('AuthService', () => {
             sign: jest.fn(),
             decode: jest.fn(),
             verify: jest.fn(),
+          },
+        },
+        {
+          provide: MailService,
+          useValue: {
+            sendEmailVerificationLink: jest.fn(),
+            sendPasswordResetCode: jest.fn(),
           },
         },
       ],

@@ -114,3 +114,36 @@ export const jwtConstants = {
   expiresIn: (process.env.JWT_EXPIRES_IN?.trim() ||
     '1d') as SignOptions['expiresIn'],
 } as const;
+
+export const authFlowConstants = {
+  frontendUrl:
+    process.env.CORS_ORIGIN?.split(',')[0]?.trim() || 'http://localhost:3000',
+  backendUrl:
+    process.env.BACKEND_PUBLIC_URL?.trim() ||
+    `http://localhost:${process.env.PORT?.trim() || '4000'}`,
+  emailVerificationExpiresMinutes: Number(
+    process.env.EMAIL_VERIFICATION_EXPIRES_MINUTES ?? '60',
+  ),
+  passwordResetExpiresMinutes: Number(
+    process.env.PASSWORD_RESET_EXPIRES_MINUTES ?? '15',
+  ),
+  passwordResetMaxAttempts: Number(process.env.PASSWORD_RESET_MAX_ATTEMPTS ?? '5'),
+} as const;
+
+export function buildFrontendLoginUrl(params?: Record<string, string>) {
+  const url = new URL('/login', authFlowConstants.frontendUrl);
+
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  return url.toString();
+}
+
+export function buildEmailVerificationConfirmUrl(token: string) {
+  const url = new URL('/auth/email-verification/confirm', authFlowConstants.backendUrl);
+  url.searchParams.set('token', token);
+  return url.toString();
+}

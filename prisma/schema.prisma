@@ -23,11 +23,13 @@ model User {
   direccion String?
   rol       Rol      @default(CLIENT)
   activo    Boolean  @default(true)
+  emailVerifiedAt DateTime?
   createdAt DateTime @default(now())
   reviews   Review[] @relation("UserReviews")
   approvedReviews Review[] @relation("ApprovedByAdmin")
   sessions  UserSession[]
   loginAttempts LoginAttempt[]
+  authTokens AuthToken[]
 
   @@map("users")
 }
@@ -167,6 +169,24 @@ model LoginAttempt {
   @@map("login_attempts")
 }
 
+model AuthToken {
+  id           String           @id @default(cuid())
+  userId       Int              @map("userId")
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  correo       String
+  purpose      AuthTokenPurpose
+  tokenHash    String?
+  codeHash     String?
+  attemptCount Int              @default(0) @map("attemptCount")
+  expiresAt    DateTime         @map("expiresAt")
+  consumedAt   DateTime?        @map("consumedAt")
+  createdAt    DateTime         @default(now()) @map("createdAt")
+
+  @@index([userId, purpose, consumedAt, expiresAt])
+  @@index([correo, purpose, consumedAt, expiresAt])
+  @@map("auth_tokens")
+}
+
 enum Rol {
   ADMIN
   CLIENT
@@ -182,4 +202,9 @@ enum ReviewStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+enum AuthTokenPurpose {
+  EMAIL_VERIFICATION_LINK
+  PASSWORD_RESET_CODE
 }

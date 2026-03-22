@@ -15,6 +15,28 @@ import { UpdateUserDto } from './dto/update-user.dto';
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async getMe(user: AuthUser) {
+    const currentUser = await this.prisma.user.findUnique({
+      where: { id: user.sub },
+      select: {
+        id: true,
+        nombre: true,
+        correo: true,
+        telefono: true,
+        direccion: true,
+        rol: true,
+        activo: true,
+        emailVerifiedAt: true,
+      },
+    });
+
+    if (!currentUser) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    return { user: this.toSafeUser(currentUser) };
+  }
+
   async updateMe(user: AuthUser, dto: UpdateProfileDto) {
     const data: Prisma.UserUpdateInput = {};
 
@@ -49,6 +71,7 @@ export class UsersService {
         direccion: true,
         rol: true,
         activo: true,
+        emailVerifiedAt: true,
         createdAt: true,
       },
     });
@@ -175,6 +198,7 @@ export class UsersService {
     direccion: string | null;
     rol: Rol;
     activo: boolean;
+    emailVerifiedAt?: Date | null;
   }) {
     return {
       id: user.id,
@@ -184,6 +208,8 @@ export class UsersService {
       direccion: user.direccion,
       rol: user.rol,
       activo: user.activo,
+      emailVerified: Boolean(user.emailVerifiedAt),
+      emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
     };
   }
 }
