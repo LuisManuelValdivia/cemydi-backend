@@ -9,14 +9,8 @@ import {
 } from '@nestjs/common';
 import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { JwtService } from '@nestjs/jwt';
 import { google } from 'googleapis';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
 
 type BackupRecordSummary = {
   id: number;
@@ -82,10 +76,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private schedulerInProgress = false;
   private lastRetentionSweepAt = 0;
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   onModuleInit() {
     this.schedulerTimer = setInterval(() => {
@@ -102,22 +93,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async createDatabaseBackupRecord(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
+  async createDatabaseBackupRecord() {
     return this.createAndStoreDatabaseBackupRecord();
   }
 
-  async createSingleTableBackupRecord(
-    authorization: string | undefined,
-    tableName: string,
-  ) {
-    this.ensureAdmin(authorization);
+  async createSingleTableBackupRecord(tableName: string) {
     return this.createAndStoreSingleTableBackupRecord(tableName);
   }
 
-  async listDatabaseBackupRecords(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async listDatabaseBackupRecords() {
     const rows = await this.prisma.$queryRaw<
       Array<{
         id: number;
@@ -134,18 +118,12 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return rows.map((item) => this.mapBackupRecordSummary(item));
   }
 
-  async getDatabaseBackupSchedule(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
+  async getDatabaseBackupSchedule() {
     const row = await this.getOrCreateBackupScheduleRow();
     return this.mapBackupScheduleSummary(row);
   }
 
-  async updateDatabaseBackupSchedule(
-    authorization: string | undefined,
-    payload: Record<string, unknown>,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async updateDatabaseBackupSchedule(payload: Record<string, unknown>) {
     const existing = await this.getOrCreateBackupScheduleRow();
     const normalized = this.normalizeSchedulePayload(payload);
     const nextRunAt = normalized.enabled
@@ -215,9 +193,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return this.mapBackupScheduleSummary(updated);
   }
 
-  async deleteDatabaseBackupSchedule(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async deleteDatabaseBackupSchedule() {
     const existing = await this.getOrCreateBackupScheduleRow();
     const now = new Date();
 
@@ -278,9 +254,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return this.mapBackupScheduleSummary(reset);
   }
 
-  async getDatabaseBackupRecord(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async getDatabaseBackupRecord(id: number) {
     const rows = await this.prisma.$queryRaw<BackupRecordRow[]>`
       SELECT "id", "fileName", "sizeBytes", "createdAt"
       FROM "database_backups"
@@ -299,9 +273,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async createDatabaseBackup(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async createDatabaseBackup() {
     const backup = await this.buildDirectDatabaseBackupPayload();
 
     return {
@@ -310,12 +282,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async deleteDatabaseBackupRecord(
-    authorization: string | undefined,
-    id: number,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async deleteDatabaseBackupRecord(id: number) {
     const existingRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
       SELECT "id", "fileName", "sizeBytes", "createdAt"
       FROM "database_backups"
@@ -798,9 +765,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async getDatabaseStatus(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async getDatabaseStatus() {
     const [runtimeRows, tableRows] = await Promise.all([
       this.prisma.$queryRaw<
         Array<{
@@ -937,12 +902,6 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         provider: 'google-drive-oauth2',
       },
     };
-  }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
   }
 
   private async insertBackupRecord(backup: {

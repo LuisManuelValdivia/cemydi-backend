@@ -3,15 +3,21 @@ import {
   Controller,
   Delete,
   Get,
-  Headers,
   Param,
   ParseIntPipe,
   Patch,
   Post,
   Query,
+  UseGuards,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import { Rol } from '@prisma/client';
+import type { AuthUser } from '../auth/auth-user.interface';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ReviewsService } from './reviews.service';
 
@@ -26,47 +32,45 @@ export class ReviewsController {
   }
 
   @Get('product/:productId/mine')
+  @UseGuards(JwtAuthGuard)
   getMyReviewByProduct(
-    @Headers('authorization') authorization: string | undefined,
+    @CurrentUser() user: AuthUser,
     @Param('productId', ParseIntPipe) productId: number,
   ) {
-    return this.reviewsService.getMyByProduct(authorization, productId);
+    return this.reviewsService.getMyByProduct(user, productId);
   }
 
   @Post()
-  submit(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() dto: CreateReviewDto,
-  ) {
-    return this.reviewsService.submit(authorization, dto);
+  @UseGuards(JwtAuthGuard)
+  submit(@CurrentUser() user: AuthUser, @Body() dto: CreateReviewDto) {
+    return this.reviewsService.submit(user, dto);
   }
 
   @Get('admin')
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
   listForAdmin(
-    @Headers('authorization') authorization: string | undefined,
     @Query('status') status: string | undefined,
     @Query('userId') userIdRaw: string | undefined,
   ) {
     const userId = userIdRaw ? Number(userIdRaw) : undefined;
-    return this.reviewsService.listForAdmin(authorization, {
+    return this.reviewsService.listForAdmin({
       status,
       userId: Number.isInteger(userId) ? userId : undefined,
     });
   }
 
   @Patch(':id/approve')
-  approve(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
-    return this.reviewsService.approve(authorization, id);
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  approve(@CurrentUser() user: AuthUser, @Param('id', ParseIntPipe) id: number) {
+    return this.reviewsService.approve(user, id);
   }
 
   @Delete(':id')
-  remove(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
-    return this.reviewsService.remove(authorization, id);
+  @Roles(Rol.ADMIN)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  remove(@Param('id', ParseIntPipe) id: number) {
+    return this.reviewsService.remove(id);
   }
 }

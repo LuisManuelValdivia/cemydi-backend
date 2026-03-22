@@ -3,26 +3,15 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 
 @Injectable()
 export class SuppliersService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async findAll() {
     const suppliers = await this.prisma.supplier.findMany({
       orderBy: { nombre: 'asc' },
     });
@@ -30,9 +19,7 @@ export class SuppliersService {
     return { suppliers };
   }
 
-  async create(authorization: string | undefined, dto: CreateSupplierDto) {
-    this.ensureAdmin(authorization);
-
+  async create(dto: CreateSupplierDto) {
     try {
       const supplier = await this.prisma.supplier.create({
         data: {
@@ -59,13 +46,7 @@ export class SuppliersService {
     }
   }
 
-  async update(
-    authorization: string | undefined,
-    id: number,
-    dto: CreateSupplierDto,
-  ) {
-    this.ensureAdmin(authorization);
-
+  async update(id: number, dto: CreateSupplierDto) {
     const existing = await this.prisma.supplier.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException('El proveedor no existe');
@@ -98,9 +79,7 @@ export class SuppliersService {
     }
   }
 
-  async delete(authorization: string | undefined, id: number) {
-    this.ensureAdmin(authorization);
-
+  async delete(id: number) {
     const existing = await this.prisma.supplier.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException('El proveedor no existe');
@@ -111,11 +90,5 @@ export class SuppliersService {
     return {
       message: 'Proveedor eliminado correctamente',
     };
-  }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    const payload = verifySessionToken(this.jwtService, token);
-    requireAdminRole(payload);
   }
 }

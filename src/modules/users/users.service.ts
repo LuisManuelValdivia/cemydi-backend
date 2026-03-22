@@ -3,29 +3,19 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { Prisma, Rol } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  extractBearerToken,
-  requireAdminRole,
-  verifySessionToken,
-} from '../auth/session.util';
+import type { AuthUser } from '../auth/auth-user.interface';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
 export class UsersService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async updateMe(authorization: string | undefined, dto: UpdateProfileDto) {
-    const payload = this.getSessionPayload(authorization);
-
+  async updateMe(user: AuthUser, dto: UpdateProfileDto) {
     const data: Prisma.UserUpdateInput = {};
 
     if (dto.nombre !== undefined) data.nombre = dto.nombre.trim();
@@ -40,17 +30,15 @@ export class UsersService {
       throw new BadRequestException('No hay campos para actualizar');
     }
 
-    const user = await this.updateUserRecord(payload.sub, data);
+    const updatedUser = await this.updateUserRecord(user.sub, data);
 
     return {
       message: 'Perfil actualizado correctamente',
-      user: this.toSafeUser(user),
+      user: this.toSafeUser(updatedUser),
     };
   }
 
-  async findAll(authorization: string | undefined) {
-    this.ensureAdmin(authorization);
-
+  async findAll() {
     const users = await this.prisma.user.findMany({
       orderBy: { createdAt: 'desc' },
       select: {
@@ -68,9 +56,7 @@ export class UsersService {
     return { users };
   }
 
-  async create(authorization: string | undefined, dto: CreateUserDto) {
-    this.ensureAdmin(authorization);
-
+  async create(dto: CreateUserDto) {
     const existingUser = await this.prisma.user.findUnique({
       where: { correo: dto.correo.trim().toLowerCase() },
     });
@@ -100,12 +86,10 @@ export class UsersService {
   }
 
   async update(
-    authorization: string | undefined,
+    currentUser: AuthUser,
     id: number,
     dto: UpdateUserDto,
   ) {
-    const payload = this.ensureAdmin(authorization);
-
     const data: Prisma.UserUpdateInput = {};
 
     if (dto.nombre !== undefined) data.nombre = dto.nombre.trim();
@@ -118,7 +102,7 @@ export class UsersService {
       data.password = await bcrypt.hash(dto.password, 10);
     if (dto.activo !== undefined) data.activo = dto.activo;
 
-    if (payload.sub === id && dto.activo === false) {
+    if (currentUser.sub === id && dto.activo === false) {
       throw new BadRequestException(
         'No puedes dar de baja tu propio usuario mientras estas en sesion',
       );
@@ -128,18 +112,16 @@ export class UsersService {
       throw new BadRequestException('No hay campos para actualizar');
     }
 
-    const user = await this.updateUserRecord(id, data);
+    const updatedUser = await this.updateUserRecord(id, data);
 
     return {
       message: 'Usuario actualizado correctamente',
-      user: this.toSafeUser(user),
+      user: this.toSafeUser(updatedUser),
     };
   }
 
-  async remove(authorization: string | undefined, id: number) {
-    const payload = this.ensureAdmin(authorization);
-
-    if (payload.sub === id) {
+  async remove(user: AuthUser, id: number) {
+    if (user.sub === id) {
       throw new BadRequestException(
         'No puedes eliminar tu propio usuario mientras estas en sesion',
       );
@@ -183,17 +165,6 @@ export class UsersService {
 
       throw error;
     }
-  }
-
-  private getSessionPayload(authorization: string | undefined) {
-    const token = extractBearerToken(authorization);
-    return verifySessionToken(this.jwtService, token);
-  }
-
-  private ensureAdmin(authorization: string | undefined) {
-    const payload = this.getSessionPayload(authorization);
-    requireAdminRole(payload);
-    return payload;
   }
 
   private toSafeUser(user: {
