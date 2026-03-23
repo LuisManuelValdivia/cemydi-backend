@@ -1,5 +1,9 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import nodemailer, { type Transporter } from 'nodemailer';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+import dns from 'node:dns';
+import net from 'node:net';
+import tls from 'node:tls';
 
 @Injectable()
 export class MailService {
@@ -23,7 +27,7 @@ export class MailService {
       );
     }
 
-    this.transporter = nodemailer.createTransport({
+    const transportOptions: SMTPTransport.Options = {
       host,
       port,
       secure,
@@ -31,7 +35,34 @@ export class MailService {
         user,
         pass,
       },
-    });
+      tls: {
+        servername: host,
+      },
+      getSocket: (options, callback) => {
+        dns.lookup(options.host ?? host, { family: 4 }, (lookupError, address) => {
+          if (lookupError) {
+            callback(lookupError, false);
+            return;
+          }
+
+          const socket = options.secure
+            ? tls.connect({
+                host: address,
+                port: options.port ?? port,
+                servername: options.host ?? host,
+              })
+            : net.connect({
+                host: address,
+                port: options.port ?? port,
+              });
+
+          socket.once('error', (socketError) => callback(socketError, false));
+          socket.once('connect', () => callback(null, { connection: socket }));
+        });
+      },
+    };
+
+    this.transporter = nodemailer.createTransport(transportOptions);
 
     return this.transporter;
   }
