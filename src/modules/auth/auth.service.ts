@@ -97,7 +97,7 @@ export class AuthService {
     await this.issueEmailVerificationLink(user.id, user.correo, user.nombre);
 
     return {
-      message: 'Usuario registrado correctamente. Revisa tu correo para verificar la cuenta.',
+      message: 'Se ha enviado un correo para que verifiques tu cuenta.',
       user: this.serializeUser(user),
     };
   }
@@ -203,7 +203,7 @@ export class AuthService {
 
     if (!user) {
       return {
-        message: 'Si el correo existe, enviaremos un enlace de verificación.',
+        message: 'Se ha enviado un correo para que verifiques tu cuenta.',
       };
     }
 
@@ -216,7 +216,7 @@ export class AuthService {
     await this.issueEmailVerificationLink(user.id, user.correo, user.nombre);
 
     return {
-      message: 'Si el correo existe, enviaremos un enlace de verificación.',
+      message: 'Se ha enviado un correo para que verifiques tu cuenta.',
     };
   }
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import nodemailer, { type Transporter } from 'nodemailer';
 
 @Injectable()
@@ -18,10 +18,9 @@ export class MailService {
     const secure = `${process.env.SMTP_SECURE ?? ''}`.trim().toLowerCase() === 'true';
 
     if (!host || !user || !pass || Number.isNaN(port)) {
-      this.logger.warn(
-        'SMTP no esta configurado completamente. Los correos se omitiran hasta definir SMTP_HOST, SMTP_PORT, SMTP_USER y SMTP_PASS.',
+      throw new InternalServerErrorException(
+        'SMTP no esta configurado completamente. Define SMTP_HOST, SMTP_PORT, SMTP_USER y SMTP_PASS para enviar correos.',
       );
-      return null;
     }
 
     this.transporter = nodemailer.createTransport({
@@ -84,18 +83,20 @@ export class MailService {
 
   private async sendMail(input: { to: string; subject: string; html: string; text: string }) {
     const transporter = this.getTransporter();
-
-    if (!transporter) {
-      return;
+    try {
+      await transporter.sendMail({
+        from: this.getFromAddress(),
+        to: input.to,
+        subject: input.subject,
+        html: input.html,
+        text: input.text,
+      });
+    } catch (error) {
+      this.logger.error(`No se pudo enviar el correo a ${input.to}`, error);
+      throw new InternalServerErrorException(
+        'No se pudo enviar el correo. Verifica la configuracion SMTP e intenta de nuevo.',
+      );
     }
-
-    await transporter.sendMail({
-      from: this.getFromAddress(),
-      to: input.to,
-      subject: input.subject,
-      html: input.html,
-      text: input.text,
-    });
   }
 
   private escapeHtml(value: string) {
