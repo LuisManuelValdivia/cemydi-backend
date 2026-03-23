@@ -702,4 +702,5 @@ export class AuthService {
         typeof (value as { exp?: unknown }).exp === 'number')
     );
   }
+
 }
