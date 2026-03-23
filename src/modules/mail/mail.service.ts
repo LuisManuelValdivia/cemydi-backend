@@ -84,15 +84,31 @@ export class MailService {
   private async sendMail(input: { to: string; subject: string; html: string; text: string }) {
     const transporter = this.getTransporter();
     try {
-      await transporter.sendMail({
+      const result = await transporter.sendMail({
         from: this.getFromAddress(),
         to: input.to,
         subject: input.subject,
         html: input.html,
         text: input.text,
       });
+      this.logger.log(
+        `Correo enviado a ${input.to}. messageId=${result.messageId ?? 'N/A'} accepted=${result.accepted?.join(',') || 'N/A'} rejected=${result.rejected?.join(',') || 'N/A'}`,
+      );
+
+      if (Array.isArray(result.rejected) && result.rejected.length > 0) {
+        throw new Error(`Destinatarios rechazados: ${result.rejected.join(', ')}`);
+      }
     } catch (error) {
-      this.logger.error(`No se pudo enviar el correo a ${input.to}`, error);
+      const smtpError = error as {
+        code?: string;
+        command?: string;
+        response?: string;
+        responseCode?: number;
+        message?: string;
+      };
+      this.logger.error(
+        `No se pudo enviar el correo a ${input.to}. code=${smtpError.code ?? 'N/A'} command=${smtpError.command ?? 'N/A'} responseCode=${smtpError.responseCode ?? 'N/A'} message=${smtpError.message ?? 'N/A'} response=${smtpError.response ?? 'N/A'}`,
+      );
       throw new InternalServerErrorException(
         'No se pudo enviar el correo. Verifica la configuracion SMTP e intenta de nuevo.',
       );
