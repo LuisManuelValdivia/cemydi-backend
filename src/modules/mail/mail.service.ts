@@ -27,6 +27,7 @@ export class MailService {
       host,
       port,
       secure,
+      family: 4,
       auth: {
         user,
         pass,
