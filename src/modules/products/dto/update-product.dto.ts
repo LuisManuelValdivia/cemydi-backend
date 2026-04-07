@@ -1,15 +1,24 @@
 import { TipoAdquisicion } from '@prisma/client';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsEnum,
   IsInt,
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   MaxLength,
   Min,
   MinLength,
 } from 'class-validator';
+import {
+  transformBoolean,
+  transformIntegerArray,
+  transformNumber,
+  transformStringArray,
+} from './product-dto.helpers';
 
 export class UpdateProductDto {
   @IsOptional()
@@ -37,6 +46,8 @@ export class UpdateProductDto {
   descripcion?: string;
 
   @IsOptional()
+  @Type(() => Number)
+  @Transform(transformNumber)
   @IsNumber()
   @Min(0)
   precio?: number;
@@ -48,6 +59,8 @@ export class UpdateProductDto {
   clasificacion?: string;
 
   @IsOptional()
+  @Type(() => Number)
+  @Transform(transformNumber)
   @IsInt()
   @Min(0)
   stock?: number;
@@ -63,10 +76,29 @@ export class UpdateProductDto {
   tipoAdquisicion?: TipoAdquisicion;
 
   @IsOptional()
+  @Transform(transformBoolean)
   @IsBoolean()
   requiereReceta?: boolean;
 
   @IsOptional()
+  @Transform(transformBoolean)
   @IsBoolean()
   activo?: boolean;
+
+  @IsOptional()
+  @Transform(transformStringArray)
+  @IsArray()
+  @IsUrl(
+    {
+      require_protocol: true,
+    },
+    { each: true },
+  )
+  imageUrls?: string[];
+
+  @IsOptional()
+  @Transform(transformIntegerArray)
+  @IsArray()
+  @IsInt({ each: true })
+  keepImageIds?: number[];
 }

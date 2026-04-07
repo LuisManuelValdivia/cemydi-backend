@@ -46,7 +46,8 @@ export class BackupsController {
     @Body() body: Record<string, unknown>,
     @Res() response: Response,
   ) {
-    const schedule = await this.backupsService.updateDatabaseBackupSchedule(body);
+    const schedule =
+      await this.backupsService.updateDatabaseBackupSchedule(body);
     response.status(200).json({
       schedule,
       message: 'Programacion de respaldos actualizada correctamente',
@@ -64,9 +65,10 @@ export class BackupsController {
 
   @Post('database')
   async createDatabaseBackup(@Res() response: Response) {
-    const backup = await this.backupsService.createDatabaseBackupRecord();
+    const result = await this.backupsService.createDatabaseBackupRecord();
     response.status(201).json({
-      backup,
+      backup: result.backup,
+      logText: result.logText,
       message: 'Respaldo generado y registrado correctamente',
     });
   }
@@ -76,10 +78,26 @@ export class BackupsController {
     @Body('tableName') tableName: string,
     @Res() response: Response,
   ) {
-    const backup = await this.backupsService.createSingleTableBackupRecord(tableName);
+    const result =
+      await this.backupsService.createSingleTableBackupRecord(tableName);
     response.status(201).json({
-      backup,
+      backup: result.backup,
+      logText: result.logText,
       message: 'Respaldo de tabla generado y registrado correctamente',
+    });
+  }
+
+  @Post('database/schema')
+  async createSingleSchemaBackup(
+    @Body('schemaName') schemaName: string,
+    @Res() response: Response,
+  ) {
+    const result =
+      await this.backupsService.createSingleSchemaBackupRecord(schemaName);
+    response.status(201).json({
+      backup: result.backup,
+      logText: result.logText,
+      message: 'Respaldo de esquema generado y registrado correctamente',
     });
   }
 

@@ -15,13 +15,22 @@ import { PrismaService } from '../../prisma/prisma.service';
 type BackupRecordSummary = {
   id: number;
   fileName: string;
+  origin: BackupOrigin;
   sizeBytes: number;
   createdAt: string;
 };
 
+type BackupRecordWithLog = {
+  backup: BackupRecordSummary;
+  logText: string;
+};
+
+type BackupOrigin = 'MANUAL' | 'AUTOMATIC' | 'TABLE';
+
 type BackupRecordRow = {
   id: number;
   fileName: string;
+  origin: BackupOrigin;
   sizeBytes: number | bigint | string;
   createdAt: Date | string;
 };
@@ -31,6 +40,7 @@ type BackupScheduleSummary = {
   everyDays: number;
   runAtTime: string;
   retentionDays: number;
+  schemaName: string | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
   createdAt: string;
@@ -43,6 +53,7 @@ type BackupScheduleRow = {
   intervalDays: number | bigint | string;
   runAtTime: string;
   retentionDays: number | bigint | string;
+  schemaName: string | null;
   lastRunAt: Date | string | null;
   nextRunAt: Date | string | null;
   createdAt: Date | string;
@@ -59,9 +70,27 @@ type ParsedDatabaseUrl = {
   channelBinding?: string;
 };
 
+type GoogleDriveProvider = 'service-account' | 'oauth2';
+
+type GoogleDriveClientContext = {
+  provider: GoogleDriveProvider;
+  drive: ReturnType<typeof google.drive>;
+};
+
+type PgDumpResult = {
+  content: Buffer;
+  verboseLog: string;
+};
+
 @Injectable()
 export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BackupsService.name);
+  private readonly managementSchema = 'management';
+  private readonly backupSchemas = [
+    'accounts',
+    'catalog',
+    'management',
+  ] as const;
   private readonly scheduleDefaults = {
     enabled: false,
     everyDays: 1,
@@ -75,6 +104,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private schedulerTimer: NodeJS.Timeout | null = null;
   private schedulerInProgress = false;
   private lastRetentionSweepAt = 0;
+  private backupScheduleSchemaColumnExists: boolean | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -94,24 +124,33 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createDatabaseBackupRecord() {
-    return this.createAndStoreDatabaseBackupRecord();
+    return this.createAndStoreDatabaseBackupRecord('MANUAL');
+  }
+
+  async createSingleSchemaBackupRecord(schemaName: string) {
+    return this.createAndStoreSingleSchemaBackupRecord(schemaName, 'TABLE');
   }
 
   async createSingleTableBackupRecord(tableName: string) {
-    return this.createAndStoreSingleTableBackupRecord(tableName);
+    return this.createAndStoreSingleTableBackupRecord(tableName, 'TABLE');
   }
 
   async listDatabaseBackupRecords() {
+    if (!(await this.tableExists('database_backups'))) {
+      return [];
+    }
+
     const rows = await this.prisma.$queryRaw<
       Array<{
         id: number;
         fileName: string;
+        origin: BackupOrigin;
         sizeBytes: number | bigint | string;
         createdAt: Date | string;
       }>
     >`
-      SELECT "id", "fileName", "sizeBytes", "createdAt"
-      FROM "database_backups"
+      SELECT "id", "fileName", "origin", "sizeBytes", "createdAt"
+      FROM "management"."database_backups"
       ORDER BY "createdAt" DESC, "id" DESC
     `;
 
@@ -119,11 +158,19 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getDatabaseBackupSchedule() {
+    if (!(await this.tableExists('database_backup_schedule'))) {
+      return this.mapBackupScheduleSummary(this.createDefaultScheduleRow());
+    }
+
     const row = await this.getOrCreateBackupScheduleRow();
     return this.mapBackupScheduleSummary(row);
   }
 
   async updateDatabaseBackupSchedule(payload: Record<string, unknown>) {
+    await this.ensureRequiredTable(
+      'database_backup_schedule',
+      'No se pudo guardar la programacion de respaldos porque la tabla database_backup_schedule no existe. Ejecuta las migraciones de Prisma.',
+    );
     const existing = await this.getOrCreateBackupScheduleRow();
     const normalized = this.normalizeSchedulePayload(payload);
     const nextRunAt = normalized.enabled
@@ -136,49 +183,21 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       : null;
     const now = new Date();
 
-    const updatedRows: unknown = await this.prisma.$queryRaw<unknown[]>`
-      INSERT INTO "database_backup_schedule" (
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-      )
-      VALUES (
-        ${this.scheduleRowId},
-        ${normalized.enabled},
-        ${normalized.everyDays},
-        ${normalized.runAtTime},
-        ${normalized.retentionDays},
-        ${this.parseOptionalDate(existing.lastRunAt)},
-        ${nextRunAt},
-        ${this.parseOptionalDate(existing.createdAt) ?? now},
-        ${now}
-      )
-      ON CONFLICT ("id") DO UPDATE
-      SET
-        "isEnabled" = EXCLUDED."isEnabled",
-        "intervalDays" = EXCLUDED."intervalDays",
-        "runAtTime" = EXCLUDED."runAtTime",
-        "retentionDays" = EXCLUDED."retentionDays",
-        "lastRunAt" = EXCLUDED."lastRunAt",
-        "nextRunAt" = EXCLUDED."nextRunAt",
-        "updatedAt" = EXCLUDED."updatedAt"
-      RETURNING
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-    `;
+    const updatedRows = await this.upsertBackupScheduleRow(
+      {
+        id: this.scheduleRowId,
+        isEnabled: normalized.enabled,
+        intervalDays: normalized.everyDays,
+        runAtTime: normalized.runAtTime,
+        retentionDays: normalized.retentionDays,
+        schemaName: normalized.schemaName,
+        lastRunAt: this.parseOptionalDate(existing.lastRunAt),
+        nextRunAt,
+        createdAt: this.parseOptionalDate(existing.createdAt) ?? now,
+        updatedAt: now,
+      },
+      true,
+    );
 
     const updated = this.getBackupScheduleRow(this.toUnknownArray(updatedRows));
     if (!updated) {
@@ -194,52 +213,28 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteDatabaseBackupSchedule() {
+    await this.ensureRequiredTable(
+      'database_backup_schedule',
+      'No se pudo eliminar la programacion de respaldos porque la tabla database_backup_schedule no existe. Ejecuta las migraciones de Prisma.',
+    );
     const existing = await this.getOrCreateBackupScheduleRow();
     const now = new Date();
 
-    const resetRows: unknown = await this.prisma.$queryRaw<unknown[]>`
-      INSERT INTO "database_backup_schedule" (
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-      )
-      VALUES (
-        ${this.scheduleRowId},
-        ${this.scheduleDefaults.enabled},
-        ${this.scheduleDefaults.everyDays},
-        ${this.scheduleDefaults.runAtTime},
-        ${this.scheduleDefaults.retentionDays},
-        ${null},
-        ${null},
-        ${this.parseOptionalDate(existing.createdAt) ?? now},
-        ${now}
-      )
-      ON CONFLICT ("id") DO UPDATE
-      SET
-        "isEnabled" = EXCLUDED."isEnabled",
-        "intervalDays" = EXCLUDED."intervalDays",
-        "runAtTime" = EXCLUDED."runAtTime",
-        "retentionDays" = EXCLUDED."retentionDays",
-        "lastRunAt" = EXCLUDED."lastRunAt",
-        "nextRunAt" = EXCLUDED."nextRunAt",
-        "updatedAt" = EXCLUDED."updatedAt"
-      RETURNING
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-    `;
+    const resetRows = await this.upsertBackupScheduleRow(
+      {
+        id: this.scheduleRowId,
+        isEnabled: this.scheduleDefaults.enabled,
+        intervalDays: this.scheduleDefaults.everyDays,
+        runAtTime: this.scheduleDefaults.runAtTime,
+        retentionDays: this.scheduleDefaults.retentionDays,
+        schemaName: null,
+        lastRunAt: null,
+        nextRunAt: null,
+        createdAt: this.parseOptionalDate(existing.createdAt) ?? now,
+        updatedAt: now,
+      },
+      true,
+    );
 
     const reset = this.getBackupScheduleRow(this.toUnknownArray(resetRows));
     if (!reset) {
@@ -255,9 +250,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getDatabaseBackupRecord(id: number) {
+    await this.ensureRequiredTable(
+      'database_backups',
+      'No se pudo consultar el respaldo porque la tabla database_backups no existe. Ejecuta las migraciones de Prisma.',
+    );
+
     const rows = await this.prisma.$queryRaw<BackupRecordRow[]>`
-      SELECT "id", "fileName", "sizeBytes", "createdAt"
-      FROM "database_backups"
+      SELECT "id", "fileName", "origin", "sizeBytes", "createdAt"
+      FROM "management"."database_backups"
       WHERE "id" = ${id}
       LIMIT 1
     `;
@@ -283,9 +283,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteDatabaseBackupRecord(id: number) {
+    await this.ensureRequiredTable(
+      'database_backups',
+      'No se pudo eliminar el respaldo porque la tabla database_backups no existe. Ejecuta las migraciones de Prisma.',
+    );
+
     const existingRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
-      SELECT "id", "fileName", "sizeBytes", "createdAt"
-      FROM "database_backups"
+      SELECT "id", "fileName", "origin", "sizeBytes", "createdAt"
+      FROM "management"."database_backups"
       WHERE "id" = ${id}
       LIMIT 1
     `;
@@ -299,34 +304,106 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return this.mapBackupRecordSummary(deleted);
   }
 
-  private async createAndStoreDatabaseBackupRecord() {
+  private async createAndStoreDatabaseBackupRecord(
+    origin: BackupOrigin,
+    options?: { applyRetention?: boolean },
+  ): Promise<BackupRecordWithLog> {
     const backup = await this.buildDatabaseBackupPayload();
     let record: BackupRecordSummary;
 
     try {
-      record = await this.insertBackupRecord(backup);
+      record = await this.insertBackupRecord({
+        ...backup,
+        origin,
+      });
     } catch (error) {
       await this.tryDeleteUploadedBackupSilently(backup.fileName);
       throw error;
     }
 
-    await this.applyRetentionPolicy();
-    return record;
+    if (options?.applyRetention) {
+      await this.applyRetentionPolicy();
+    }
+
+    return {
+      backup: record,
+      logText: this.composeBackupExecutionLog({
+        backupType: 'database',
+        fileName: backup.fileName,
+        sizeBytes: backup.sizeBytes,
+        requestedAt: backup.createdAt,
+        backupCreatedAt: record.createdAt,
+        provider: this.getGoogleDriveProvider(),
+        verboseLog: backup.verboseLog,
+        recordId: record.id,
+      }),
+    };
   }
 
-  private async createAndStoreSingleTableBackupRecord(tableName: string) {
+  private async createAndStoreSingleSchemaBackupRecord(
+    schemaName: string,
+    origin: BackupOrigin,
+  ): Promise<BackupRecordWithLog> {
+    const backup = await this.buildSingleSchemaBackupPayload(schemaName);
+    let record: BackupRecordSummary;
+
+    try {
+      record = await this.insertBackupRecord({
+        ...backup,
+        origin,
+      });
+    } catch (error) {
+      await this.tryDeleteUploadedBackupSilently(backup.fileName);
+      throw error;
+    }
+
+    return {
+      backup: record,
+      logText: this.composeBackupExecutionLog({
+        backupType: 'schema',
+        schemaName,
+        fileName: backup.fileName,
+        sizeBytes: backup.sizeBytes,
+        requestedAt: backup.createdAt,
+        backupCreatedAt: record.createdAt,
+        provider: this.getGoogleDriveProvider(),
+        verboseLog: backup.verboseLog,
+        recordId: record.id,
+      }),
+    };
+  }
+
+  private async createAndStoreSingleTableBackupRecord(
+    tableName: string,
+    origin: BackupOrigin,
+  ): Promise<BackupRecordWithLog> {
     const backup = await this.buildSingleTableBackupPayload(tableName);
     let record: BackupRecordSummary;
 
     try {
-      record = await this.insertBackupRecord(backup);
+      record = await this.insertBackupRecord({
+        ...backup,
+        origin,
+      });
     } catch (error) {
       await this.tryDeleteUploadedBackupSilently(backup.fileName);
       throw error;
     }
 
-    await this.applyRetentionPolicy();
-    return record;
+    return {
+      backup: record,
+      logText: this.composeBackupExecutionLog({
+        backupType: 'table',
+        tableName,
+        fileName: backup.fileName,
+        sizeBytes: backup.sizeBytes,
+        requestedAt: backup.createdAt,
+        backupCreatedAt: record.createdAt,
+        provider: this.getGoogleDriveProvider(),
+        verboseLog: backup.verboseLog,
+        recordId: record.id,
+      }),
+    };
   }
 
   private async runAutomationTick() {
@@ -337,6 +414,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     this.schedulerInProgress = true;
 
     try {
+      const [hasScheduleTable, hasBackupsTable] = await Promise.all([
+        this.tableExists('database_backup_schedule'),
+        this.tableExists('database_backups'),
+      ]);
+      if (!hasScheduleTable || !hasBackupsTable) {
+        return;
+      }
+
       const schedule = await this.getOrCreateBackupScheduleRow();
       const now = new Date();
 
@@ -349,8 +434,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
             `Iniciando respaldo automatico programado para ${schedule.runAtTime} cada ${this.toSafeNumber(schedule.intervalDays)} dia(s)`,
           );
 
-          const createdBackup = await this.createAndStoreDatabaseBackupRecord();
-          const executedAt = new Date(createdBackup.createdAt);
+          const createdBackup = schedule.schemaName
+            ? await this.createAndStoreSingleSchemaBackupRecord(
+                schedule.schemaName,
+                'AUTOMATIC',
+              )
+            : await this.createAndStoreDatabaseBackupRecord('AUTOMATIC', {
+                applyRetention: true,
+              });
+          const executedAt = new Date(createdBackup.backup.createdAt);
           const refreshedSchedule = await this.getOrCreateBackupScheduleRow();
           const nextRunAt = this.computeNextRunAt(
             executedAt,
@@ -366,8 +458,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           );
 
           this.logger.log(
-            `Respaldo automatico completado: ${createdBackup.fileName}`,
+            `Respaldo automatico completado: ${createdBackup.backup.fileName}`,
           );
+          await this.applyRetentionPolicy();
         }
       }
 
@@ -430,7 +523,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     nextRunAt: Date | null,
   ) {
     await this.prisma.$queryRaw`
-      UPDATE "database_backup_schedule"
+      UPDATE "management"."database_backup_schedule"
       SET
         "lastRunAt" = ${lastRunAt},
         "nextRunAt" = ${nextRunAt},
@@ -440,21 +533,11 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async getOrCreateBackupScheduleRow(): Promise<BackupScheduleRow> {
-    const existingRows: unknown = await this.prisma.$queryRaw<unknown[]>`
-      SELECT
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-      FROM "database_backup_schedule"
-      WHERE "id" = ${this.scheduleRowId}
-      LIMIT 1
-    `;
+    if (!(await this.tableExists('database_backup_schedule'))) {
+      return this.createDefaultScheduleRow();
+    }
+
+    const existingRows = await this.selectBackupScheduleRows();
 
     const existing = this.getBackupScheduleRow(
       this.toUnknownArray(existingRows),
@@ -464,41 +547,21 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const now = new Date();
-    const createdRows: unknown = await this.prisma.$queryRaw<unknown[]>`
-      INSERT INTO "database_backup_schedule" (
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-      )
-      VALUES (
-        ${this.scheduleRowId},
-        ${this.scheduleDefaults.enabled},
-        ${this.scheduleDefaults.everyDays},
-        ${this.scheduleDefaults.runAtTime},
-        ${this.scheduleDefaults.retentionDays},
-        ${null},
-        ${null},
-        ${now},
-        ${now}
-      )
-      ON CONFLICT ("id") DO NOTHING
-      RETURNING
-        "id",
-        "isEnabled",
-        "intervalDays",
-        "runAtTime",
-        "retentionDays",
-        "lastRunAt",
-        "nextRunAt",
-        "createdAt",
-        "updatedAt"
-    `;
+    const createdRows = await this.upsertBackupScheduleRow(
+      {
+        id: this.scheduleRowId,
+        isEnabled: this.scheduleDefaults.enabled,
+        intervalDays: this.scheduleDefaults.everyDays,
+        runAtTime: this.scheduleDefaults.runAtTime,
+        retentionDays: this.scheduleDefaults.retentionDays,
+        schemaName: null,
+        lastRunAt: null,
+        nextRunAt: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      false,
+    );
 
     return (
       this.getBackupScheduleRow(this.toUnknownArray(createdRows)) ??
@@ -514,6 +577,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       everyDays: this.toSafeNumber(row.intervalDays),
       runAtTime: row.runAtTime,
       retentionDays: this.toSafeNumber(row.retentionDays),
+      schemaName: row.schemaName,
       lastRunAt: this.toIsoString(row.lastRunAt),
       nextRunAt: this.toIsoString(row.nextRunAt),
       createdAt: this.toIsoString(row.createdAt) ?? new Date().toISOString(),
@@ -522,6 +586,8 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private normalizeSchedulePayload(payload: Record<string, unknown>) {
+    const schemaName = this.normalizeOptionalSchemaName(payload.schemaName);
+
     return {
       enabled: this.normalizeBoolean(
         payload.enabled,
@@ -538,6 +604,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         'la retencion de respaldos',
         3650,
       ),
+      schemaName,
     };
   }
 
@@ -635,6 +702,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private async applyRetentionPolicy(
     retentionDaysOverride?: number | bigint | string,
   ) {
+    if (!(await this.tableExists('database_backups'))) {
+      return 0;
+    }
+
     const retentionDays =
       retentionDaysOverride !== undefined
         ? this.toSafeNumber(retentionDaysOverride)
@@ -650,9 +721,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       Date.now() - retentionDays * 24 * 60 * 60 * 1000,
     );
     const expiredBackups = await this.prisma.$queryRaw<BackupRecordRow[]>`
-      SELECT "id", "fileName", "sizeBytes", "createdAt"
-      FROM "database_backups"
+      SELECT "id", "fileName", "origin", "sizeBytes", "createdAt"
+      FROM "management"."database_backups"
       WHERE "createdAt" < ${cutoffDate}
+        AND "origin"::text = ${'AUTOMATIC'}
       ORDER BY "createdAt" ASC, "id" ASC
     `;
 
@@ -685,13 +757,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private async buildDatabaseBackupPayload() {
     const now = new Date();
     const fileName = this.createBackupFileName(now);
-    const content = await this.runPgDump();
+    const dump = await this.runPgDump();
+    const content = dump.content;
     await this.uploadBackupToDrive(fileName, content);
 
     return {
       fileName,
       sizeBytes: content.length,
       createdAt: now,
+      verboseLog: dump.verboseLog,
     };
   }
 
@@ -705,13 +779,37 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
     const now = new Date();
     const fileName = this.createTableBackupFileName(now, tableName);
-    const content = await this.runPgDump(tableName);
+    const dump = await this.runPgDump(tableName);
+    const content = dump.content;
     await this.uploadBackupToDrive(fileName, content);
 
     return {
       fileName,
       sizeBytes: content.length,
       createdAt: now,
+      verboseLog: dump.verboseLog,
+    };
+  }
+
+  private async buildSingleSchemaBackupPayload(rawSchemaName: string) {
+    const schemaName = this.normalizeSchemaName(rawSchemaName);
+    const availableSchemas = await this.listBackupSchemaNames();
+
+    if (!availableSchemas.includes(schemaName)) {
+      throw new NotFoundException('El esquema seleccionado no existe');
+    }
+
+    const now = new Date();
+    const fileName = this.createSchemaBackupFileName(now, schemaName);
+    const dump = await this.runPgDump(undefined, schemaName);
+    const content = dump.content;
+    await this.uploadBackupToDrive(fileName, content);
+
+    return {
+      fileName,
+      sizeBytes: content.length,
+      createdAt: now,
+      verboseLog: dump.verboseLog,
     };
   }
 
@@ -726,12 +824,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private mapBackupRecordSummary(item: {
     id: number;
     fileName: string;
+    origin: BackupOrigin;
     sizeBytes: number | bigint | string;
     createdAt: Date | string;
   }): BackupRecordSummary {
     return {
       id: item.id,
       fileName: item.fileName,
+      origin: item.origin,
       sizeBytes: this.toSafeNumber(item.sizeBytes),
       createdAt:
         item.createdAt instanceof Date
@@ -747,7 +847,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   private createTableBackupFileName(date: Date, tableName: string) {
     const timestamp = this.createBackupTimestamp(date);
-    return `cemydi_${tableName}_backup_${timestamp.date}_${timestamp.time}.tar`;
+    const safeTableName = tableName.replace(/\./g, '_');
+    return `cemydi_${safeTableName}_backup_${timestamp.date}_${timestamp.time}.tar`;
+  }
+
+  private createSchemaBackupFileName(date: Date, schemaName: string) {
+    const timestamp = this.createBackupTimestamp(date);
+    return `cemydi_${schemaName}_schema_backup_${timestamp.date}_${timestamp.time}.tar`;
   }
 
   private createBackupTimestamp(date: Date) {
@@ -766,153 +872,341 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getDatabaseStatus() {
-    const [runtimeRows, tableRows] = await Promise.all([
-      this.prisma.$queryRaw<
-        Array<{
-          databaseName: string;
-          version: string;
-          sizeBytes: bigint | number | string;
-          activeConnections: number;
-          idleConnections: number;
-          totalConnections: number;
-          commits: bigint | number | string;
-          rollbacks: bigint | number | string;
-          uptimeSeconds: bigint | number | string;
-        }>
-      >`
-        SELECT
-          current_database() AS "databaseName",
-          version() AS "version",
-          pg_database_size(current_database()) AS "sizeBytes",
-          (
-            SELECT COUNT(*)::int
-            FROM pg_stat_activity
-            WHERE datname = current_database() AND state = 'active'
-          ) AS "activeConnections",
-          (
-            SELECT COUNT(*)::int
-            FROM pg_stat_activity
-            WHERE datname = current_database() AND state = 'idle'
-          ) AS "idleConnections",
-          (
-            SELECT COUNT(*)::int
-            FROM pg_stat_activity
-            WHERE datname = current_database()
-          ) AS "totalConnections",
-          (
-            SELECT xact_commit
-            FROM pg_stat_database
-            WHERE datname = current_database()
-          ) AS "commits",
-          (
-            SELECT xact_rollback
-            FROM pg_stat_database
-            WHERE datname = current_database()
-          ) AS "rollbacks",
-          EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint AS "uptimeSeconds"
-      `,
-      this.prisma.$queryRaw<
-        Array<{
-          tableName: string;
-          rowCount: bigint | number | string;
-          sizeBytes: bigint | number | string;
-        }>
-      >`
-        SELECT
-          table_stats."tableName",
-          COALESCE(table_stats."rowCount", 0) AS "rowCount",
-          COALESCE(table_stats."sizeBytes", 0) AS "sizeBytes"
-        FROM (
+    const hasPrismaMigrationsTable =
+      await this.tableExists('_prisma_migrations');
+    const [runtimeRows, tableRows, indexRows, connectionRows, initializedRows] =
+      await Promise.all([
+        this.prisma.$queryRaw<
+          Array<{
+            databaseName: string;
+            version: string;
+            sizeBytes: bigint | number | string;
+            totalIndexes: number;
+          }>
+        >`
           SELECT
-            tables.table_name AS "tableName",
+            current_database() AS "databaseName",
+            version() AS "version",
+            pg_database_size(current_database()) AS "sizeBytes",
             (
-              xpath(
-                '/row/count/text()',
-                query_to_xml(
-                  format(
-                    'SELECT COUNT(*)::bigint AS count FROM %I.%I',
-                    tables.table_schema,
-                    tables.table_name
-                  ),
-                  true,
-                  true,
-                  ''
+              SELECT COUNT(*)::int
+              FROM pg_indexes
+              WHERE schemaname IN ('accounts', 'catalog', 'management')
+                AND NOT (
+                  schemaname = 'management'
+                  AND tablename = '_prisma_migrations'
                 )
-              )
-            )[1]::text::bigint AS "rowCount",
-            pg_total_relation_size(
-              to_regclass(format('%I.%I', tables.table_schema, tables.table_name))
-            )::bigint AS "sizeBytes"
-          FROM information_schema.tables AS tables
-          WHERE tables.table_schema = 'public'
-            AND tables.table_type = 'BASE TABLE'
-            AND tables.table_name <> '_prisma_migrations'
-        ) AS table_stats
-        ORDER BY table_stats."sizeBytes" DESC, table_stats."tableName" ASC
-      `,
-    ]);
+            ) AS "totalIndexes"
+        `,
+        this.prisma.$queryRaw<
+          Array<{
+            tableName: string;
+            rowCount: bigint | number | string;
+            sequentialScans: bigint | number | string;
+            indexScans: bigint | number | string;
+            totalQueries: bigint | number | string;
+            totalSizeBytes: bigint | number | string;
+            tableSizeBytes: bigint | number | string;
+            indexSizeBytes: bigint | number | string;
+            indexUsagePercent: number | string;
+          }>
+        >`
+          SELECT
+            (stats.schemaname || '.' || stats.relname) AS "tableName",
+            COALESCE(stats.n_live_tup, 0)::bigint AS "rowCount",
+            COALESCE(stats.seq_scan, 0)::bigint AS "sequentialScans",
+            COALESCE(stats.idx_scan, 0)::bigint AS "indexScans",
+            (COALESCE(stats.seq_scan, 0) + COALESCE(stats.idx_scan, 0))::bigint AS "totalQueries",
+            pg_total_relation_size(stats.relid)::bigint AS "totalSizeBytes",
+            pg_relation_size(stats.relid)::bigint AS "tableSizeBytes",
+            pg_indexes_size(stats.relid)::bigint AS "indexSizeBytes",
+            CASE
+              WHEN (COALESCE(stats.seq_scan, 0) + COALESCE(stats.idx_scan, 0)) > 0 THEN
+                ROUND(
+                  (
+                    COALESCE(stats.idx_scan, 0)::numeric /
+                    (COALESCE(stats.seq_scan, 0) + COALESCE(stats.idx_scan, 0))::numeric
+                  ) * 100,
+                  2
+                )
+              ELSE 0::numeric
+            END AS "indexUsagePercent"
+          FROM pg_stat_user_tables AS stats
+          WHERE stats.schemaname IN ('accounts', 'catalog', 'management')
+            AND NOT (
+              stats.schemaname = 'management'
+              AND stats.relname = '_prisma_migrations'
+            )
+          ORDER BY
+            pg_total_relation_size(stats.relid) DESC,
+            stats.schemaname ASC,
+            stats.relname ASC
+        `,
+        this.prisma.$queryRaw<
+          Array<{
+            indexName: string;
+            tableName: string;
+            scans: bigint | number | string;
+            sizeBytes: bigint | number | string;
+          }>
+        >`
+          SELECT
+            (index_stats.schemaname || '.' || index_stats.indexrelname) AS "indexName",
+            (index_stats.schemaname || '.' || index_stats.relname) AS "tableName",
+            COALESCE(index_stats.idx_scan, 0)::bigint AS "scans",
+            pg_relation_size(index_stats.indexrelid)::bigint AS "sizeBytes"
+          FROM pg_stat_user_indexes AS index_stats
+          WHERE index_stats.schemaname IN ('accounts', 'catalog', 'management')
+            AND NOT (
+              index_stats.schemaname = 'management'
+              AND index_stats.relname = '_prisma_migrations'
+            )
+          ORDER BY
+            COALESCE(index_stats.idx_scan, 0) DESC,
+            pg_relation_size(index_stats.indexrelid) DESC,
+            index_stats.indexrelname ASC
+          LIMIT 10
+        `,
+        this.prisma.$queryRaw<
+          Array<{
+            pid: number;
+            userName: string;
+            state: string | null;
+            clientAddress: string | null;
+            applicationName: string | null;
+            backendType: string | null;
+          }>
+        >`
+          SELECT
+            pid::int AS "pid",
+            COALESCE(usename, 'desconocido') AS "userName",
+            state AS "state",
+            CASE
+              WHEN client_addr IS NULL AND backend_type = 'client backend' THEN 'local'
+              WHEN client_addr IS NULL THEN 'interna'
+              ELSE client_addr::text
+            END AS "clientAddress",
+            NULLIF(application_name, '') AS "applicationName",
+            backend_type AS "backendType"
+          FROM pg_stat_activity
+          WHERE datname = current_database()
+          ORDER BY
+            CASE
+              WHEN state = 'active' THEN 0
+              WHEN state = 'idle in transaction' THEN 1
+              WHEN state = 'idle' THEN 2
+              ELSE 3
+            END,
+            pid ASC
+        `,
+        hasPrismaMigrationsTable
+          ? this.prisma.$queryRaw<
+              Array<{
+                initializedAt: Date | string | null;
+              }>
+            >`
+              SELECT
+                COALESCE(MIN("finished_at"), MIN("started_at")) AS "initializedAt"
+              FROM "management"."_prisma_migrations"
+            `
+          : Promise.resolve([{ initializedAt: null }]),
+      ]);
 
     const runtime = runtimeRows[0];
+    const initializedAt = this.parseOptionalDate(
+      initializedRows[0]?.initializedAt ?? null,
+    );
     const sizeBytes = this.toSafeNumber(runtime?.sizeBytes);
-    const commits = this.toSafeNumber(runtime?.commits);
-    const rollbacks = this.toSafeNumber(runtime?.rollbacks);
-    const uptimeSeconds = this.toSafeNumber(runtime?.uptimeSeconds);
     const tableStats = tableRows.map((item) => {
-      const tableSizeBytes = this.toSafeNumber(item.sizeBytes);
+      const totalSizeBytes = this.toSafeNumber(item.totalSizeBytes);
+      const tableSizeBytes = this.toSafeNumber(item.tableSizeBytes);
+      const indexSizeBytes = this.toSafeNumber(item.indexSizeBytes);
+      const sequentialScans = this.toSafeNumber(item.sequentialScans);
+      const indexScans = this.toSafeNumber(item.indexScans);
+      const totalQueries = this.toSafeNumber(item.totalQueries);
+      const indexUsagePercent = Number(item.indexUsagePercent ?? 0);
+
       return {
         tableName: item.tableName,
         rowCount: this.toSafeNumber(item.rowCount),
-        sizeBytes: tableSizeBytes,
-        sizePretty: this.formatBytes(tableSizeBytes),
+        sequentialScans,
+        indexScans,
+        totalQueries,
+        totalSizeBytes,
+        totalSizePretty: this.formatBytes(totalSizeBytes),
+        tableSizeBytes,
+        tableSizePretty: this.formatBytes(tableSizeBytes),
+        indexSizeBytes,
+        indexSizePretty: this.formatBytes(indexSizeBytes),
+        indexUsagePercent: Number.isFinite(indexUsagePercent)
+          ? Math.max(0, Math.min(100, indexUsagePercent))
+          : 0,
       };
     });
+    const topQueriedTables = [...tableStats]
+      .sort(
+        (a, b) =>
+          b.totalQueries - a.totalQueries ||
+          b.totalSizeBytes - a.totalSizeBytes,
+      )
+      .slice(0, 8);
+    const indexStats = indexRows.map((item) => {
+      const scans = this.toSafeNumber(item.scans);
+      const indexSizeBytes = this.toSafeNumber(item.sizeBytes);
+
+      return {
+        indexName: item.indexName,
+        tableName: item.tableName,
+        scans,
+        sizeBytes: indexSizeBytes,
+        sizePretty: this.formatBytes(indexSizeBytes),
+      };
+    });
+    let activeConnections = 0;
+    let idleConnections = 0;
+    let idleInTransactionConnections = 0;
+    let otherConnections = 0;
+    let internalConnections = 0;
+
+    const connectionItems = connectionRows.map((item) => {
+      const backendType = item.backendType?.trim() || 'client backend';
+      const rawState = item.state?.trim().toLowerCase() || 'unknown';
+      const normalizedState =
+        backendType !== 'client backend'
+          ? 'internal'
+          : rawState === 'active'
+            ? 'active'
+            : rawState === 'idle'
+              ? 'idle'
+              : rawState === 'idle in transaction'
+                ? 'idle in transaction'
+                : 'other';
+
+      if (normalizedState === 'active') {
+        activeConnections += 1;
+      } else if (normalizedState === 'idle') {
+        idleConnections += 1;
+      } else if (normalizedState === 'idle in transaction') {
+        idleInTransactionConnections += 1;
+      } else if (normalizedState === 'internal') {
+        internalConnections += 1;
+      } else {
+        otherConnections += 1;
+      }
+
+      return {
+        pid: item.pid,
+        userName: item.userName,
+        state: normalizedState,
+        clientAddress: item.clientAddress?.trim() || 'desconocida',
+        applicationName: item.applicationName?.trim() || 'Sin etiqueta',
+        backendType,
+      };
+    });
+    const groupedUsers = new Map<
+      string,
+      {
+        userName: string;
+        totalConnections: number;
+        activeConnections: number;
+        internalConnections: number;
+      }
+    >();
+    for (const connection of connectionItems) {
+      const existing = groupedUsers.get(connection.userName) ?? {
+        userName: connection.userName,
+        totalConnections: 0,
+        activeConnections: 0,
+        internalConnections: 0,
+      };
+      existing.totalConnections += 1;
+      if (connection.state === 'active') {
+        existing.activeConnections += 1;
+      }
+      if (connection.state === 'internal') {
+        existing.internalConnections += 1;
+      }
+      groupedUsers.set(connection.userName, existing);
+    }
+    const databaseUsers = [...groupedUsers.values()].sort(
+      (a, b) =>
+        b.totalConnections - a.totalConnections ||
+        b.activeConnections - a.activeConnections ||
+        a.userName.localeCompare(b.userName),
+    );
 
     const totalRows = tableStats.reduce((acc, item) => acc + item.rowCount, 0);
     const totalTableBytes = tableStats.reduce(
-      (acc, item) => acc + item.sizeBytes,
+      (acc, item) => acc + item.totalSizeBytes,
       0,
     );
+    const databaseAgeSeconds = initializedAt
+      ? Math.max(0, Math.floor((Date.now() - initializedAt.getTime()) / 1000))
+      : 0;
 
     return {
       checkedAt: new Date().toISOString(),
       isOnline: true,
       databaseName: runtime?.databaseName ?? 'unknown',
       dbVersion: runtime?.version ?? 'unknown',
-      uptimeSeconds,
+      initializedAt: initializedAt?.toISOString() ?? null,
+      databaseAgeSeconds,
       sizeBytes,
       sizePretty: this.formatBytes(sizeBytes),
+      overview: {
+        totalTables: tableStats.length,
+        totalIndexes: runtime?.totalIndexes ?? indexStats.length,
+        totalRows,
+        totalSizeBytes: totalTableBytes,
+        totalSizePretty: this.formatBytes(totalTableBytes),
+      },
       connections: {
-        total: runtime?.totalConnections ?? 0,
-        active: runtime?.activeConnections ?? 0,
-        idle: runtime?.idleConnections ?? 0,
+        total: connectionItems.length,
+        active: activeConnections,
+        idle: idleConnections,
+        idleInTransaction: idleInTransactionConnections,
+        internal: internalConnections,
+        other: otherConnections,
+        items: connectionItems,
       },
-      transactions: {
-        commits,
-        rollbacks,
-      },
+      users: databaseUsers,
+      indexes: indexStats,
       tables: {
         totalRows,
         totalSizeBytes: totalTableBytes,
         totalSizePretty: this.formatBytes(totalTableBytes),
+        totalIndexes: runtime?.totalIndexes ?? indexStats.length,
         items: tableStats,
+        topQueried: topQueriedTables,
       },
       backup: {
         format: 'application/x-tar',
         fileExtension: '.tar',
-        provider: 'google-drive-oauth2',
+        provider: `google-drive-${this.getGoogleDriveProvider()}`,
       },
     };
   }
 
   private async insertBackupRecord(backup: {
     fileName: string;
+    origin: BackupOrigin;
     sizeBytes: number;
     createdAt: Date;
   }) {
+    await this.ensureRequiredTable(
+      'database_backups',
+      'No se pudo guardar el respaldo porque la tabla database_backups no existe. Ejecuta las migraciones de Prisma.',
+    );
+
     const createdRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
-      INSERT INTO "database_backups" ("fileName", "sizeBytes", "createdAt")
-      VALUES (${backup.fileName}, ${backup.sizeBytes}, ${backup.createdAt})
-      RETURNING "id", "fileName", "sizeBytes", "createdAt"
+      INSERT INTO "management"."database_backups" ("fileName", "origin", "sizeBytes", "createdAt")
+      VALUES (
+        ${backup.fileName},
+        CAST(${backup.origin} AS "public"."BackupOrigin"),
+        ${backup.sizeBytes},
+        ${backup.createdAt}
+      )
+      RETURNING "id", "fileName", "origin", "sizeBytes", "createdAt"
     `;
 
     const created = createdRows[0];
@@ -924,10 +1218,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deleteBackupRecordAssets(record: BackupRecordRow) {
+    await this.ensureRequiredTable(
+      'database_backups',
+      'No se pudo eliminar el respaldo porque la tabla database_backups no existe. Ejecuta las migraciones de Prisma.',
+    );
+
     const deletedRows = await this.prisma.$queryRaw<BackupRecordRow[]>`
-      DELETE FROM "database_backups"
+      DELETE FROM "management"."database_backups"
       WHERE "id" = ${record.id}
-      RETURNING "id", "fileName", "sizeBytes", "createdAt"
+      RETURNING "id", "fileName", "origin", "sizeBytes", "createdAt"
     `;
 
     const deleted = deletedRows[0];
@@ -939,15 +1238,37 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       await this.deleteBackupFromDrive(deleted.fileName);
       return deleted;
     } catch (error) {
+      if (this.shouldKeepBackupDeletionLocal(error)) {
+        const message =
+          error instanceof Error && error.message.trim()
+            ? error.message.trim()
+            : 'Error desconocido al eliminar en Google Drive';
+        this.logger.warn(
+          `Se elimino solo el registro local del respaldo ${deleted.fileName} porque Google Drive no esta disponible o requiere reautenticacion: ${message}`,
+        );
+        return deleted;
+      }
+
       await this.restoreBackupRecord(deleted);
       throw error;
     }
   }
 
   private async restoreBackupRecord(record: BackupRecordRow) {
+    await this.ensureRequiredTable(
+      'database_backups',
+      'No se pudo restaurar el registro del respaldo porque la tabla database_backups no existe. Ejecuta las migraciones de Prisma.',
+    );
+
     await this.prisma.$queryRaw`
-      INSERT INTO "database_backups" ("id", "fileName", "sizeBytes", "createdAt")
-      VALUES (${record.id}, ${record.fileName}, ${this.toSafeNumber(record.sizeBytes)}, ${this.parseOptionalDate(record.createdAt) ?? new Date()})
+      INSERT INTO "management"."database_backups" ("id", "fileName", "origin", "sizeBytes", "createdAt")
+      VALUES (
+        ${record.id},
+        ${record.fileName},
+        CAST(${record.origin} AS "public"."BackupOrigin"),
+        ${this.toSafeNumber(record.sizeBytes)},
+        ${this.parseOptionalDate(record.createdAt) ?? new Date()}
+      )
     `;
   }
 
@@ -971,15 +1292,34 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         tableName: string;
       }>
     >`
-      SELECT tables.table_name AS "tableName"
+      SELECT (tables.table_schema || '.' || tables.table_name) AS "tableName"
       FROM information_schema.tables AS tables
-      WHERE tables.table_schema = 'public'
+      WHERE tables.table_schema IN ('accounts', 'catalog', 'management')
         AND tables.table_type = 'BASE TABLE'
-        AND tables.table_name <> '_prisma_migrations'
-      ORDER BY tables.table_name ASC
+        AND NOT (
+          tables.table_schema = 'management'
+          AND tables.table_name = '_prisma_migrations'
+        )
+      ORDER BY tables.table_schema ASC, tables.table_name ASC
     `;
 
     return tableRows.map((item) => item.tableName);
+  }
+
+  private async listBackupSchemaNames() {
+    const rows = await this.prisma.$queryRaw<Array<{ schemaName: string }>>`
+      SELECT DISTINCT tables.table_schema AS "schemaName"
+      FROM information_schema.tables AS tables
+      WHERE tables.table_schema IN ('accounts', 'catalog', 'management')
+        AND tables.table_type = 'BASE TABLE'
+        AND NOT (
+          tables.table_schema = 'management'
+          AND tables.table_name = '_prisma_migrations'
+        )
+      ORDER BY tables.table_schema ASC
+    `;
+
+    return rows.map((item) => item.schemaName);
   }
 
   private normalizeTableName(tableName: string) {
@@ -993,11 +1333,259 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (!/^[a-z][a-z0-9_]*$/.test(normalized)) {
+    if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?$/.test(normalized)) {
       throw new BadRequestException('Nombre de tabla invalido');
     }
 
     return normalized;
+  }
+
+  private normalizeSchemaName(schemaName: string) {
+    const normalized = String(schemaName ?? '')
+      .trim()
+      .toLowerCase();
+
+    if (!normalized) {
+      throw new BadRequestException(
+        'Selecciona un esquema para generar el respaldo',
+      );
+    }
+
+    if (
+      !this.backupSchemas.includes(
+        normalized as (typeof this.backupSchemas)[number],
+      )
+    ) {
+      throw new BadRequestException('Nombre de esquema invalido');
+    }
+
+    return normalized;
+  }
+
+  private normalizeOptionalSchemaName(rawValue: unknown) {
+    const normalized =
+      this.normalizeOptionalText(rawValue)?.toLowerCase() ?? '';
+
+    if (!normalized) {
+      return null;
+    }
+
+    if (
+      !this.backupSchemas.includes(
+        normalized as (typeof this.backupSchemas)[number],
+      )
+    ) {
+      throw new BadRequestException('Nombre de esquema invalido');
+    }
+
+    return normalized;
+  }
+
+  private createDefaultScheduleRow(): BackupScheduleRow {
+    const now = new Date();
+    return {
+      id: this.scheduleRowId,
+      isEnabled: this.scheduleDefaults.enabled,
+      intervalDays: this.scheduleDefaults.everyDays,
+      runAtTime: this.scheduleDefaults.runAtTime,
+      retentionDays: this.scheduleDefaults.retentionDays,
+      schemaName: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private async selectBackupScheduleRows() {
+    const hasSchemaNameColumn = await this.hasBackupScheduleSchemaColumn();
+    const schemaSelection = hasSchemaNameColumn
+      ? `"schemaName"`
+      : `NULL::text AS "schemaName"`;
+
+    return this.prisma.$queryRawUnsafe(
+      `
+        SELECT
+          "id",
+          "isEnabled",
+          "intervalDays",
+          "runAtTime",
+          "retentionDays",
+          ${schemaSelection},
+          "lastRunAt",
+          "nextRunAt",
+          "createdAt",
+          "updatedAt"
+        FROM "management"."database_backup_schedule"
+        WHERE "id" = $1
+        LIMIT 1
+      `,
+      this.scheduleRowId,
+    );
+  }
+
+  private async upsertBackupScheduleRow(
+    row: {
+      id: number;
+      isEnabled: boolean;
+      intervalDays: number;
+      runAtTime: string;
+      retentionDays: number;
+      schemaName: string | null;
+      lastRunAt: Date | null;
+      nextRunAt: Date | null;
+      createdAt: Date;
+      updatedAt: Date;
+    },
+    overwriteExisting: boolean,
+  ) {
+    const hasSchemaNameColumn = await this.hasBackupScheduleSchemaColumn();
+    const schemaColumns = hasSchemaNameColumn ? `, "schemaName"` : '';
+    const schemaValuePlaceholder = hasSchemaNameColumn ? `, $6` : '';
+    const schemaUpdate = hasSchemaNameColumn
+      ? `"schemaName" = EXCLUDED."schemaName",`
+      : '';
+    const schemaSelection = hasSchemaNameColumn
+      ? `"schemaName"`
+      : `NULL::text AS "schemaName"`;
+    const conflictAction = overwriteExisting
+      ? `
+        DO UPDATE
+        SET
+          "isEnabled" = EXCLUDED."isEnabled",
+          "intervalDays" = EXCLUDED."intervalDays",
+          "runAtTime" = EXCLUDED."runAtTime",
+          "retentionDays" = EXCLUDED."retentionDays",
+          ${schemaUpdate}
+          "lastRunAt" = EXCLUDED."lastRunAt",
+          "nextRunAt" = EXCLUDED."nextRunAt",
+          "updatedAt" = EXCLUDED."updatedAt"
+      `
+      : `DO NOTHING`;
+
+    const params = hasSchemaNameColumn
+      ? [
+          row.id,
+          row.isEnabled,
+          row.intervalDays,
+          row.runAtTime,
+          row.retentionDays,
+          row.schemaName,
+          row.lastRunAt,
+          row.nextRunAt,
+          row.createdAt,
+          row.updatedAt,
+        ]
+      : [
+          row.id,
+          row.isEnabled,
+          row.intervalDays,
+          row.runAtTime,
+          row.retentionDays,
+          row.lastRunAt,
+          row.nextRunAt,
+          row.createdAt,
+          row.updatedAt,
+        ];
+
+    const sql = hasSchemaNameColumn
+      ? `
+        INSERT INTO "management"."database_backup_schedule" (
+          "id",
+          "isEnabled",
+          "intervalDays",
+          "runAtTime",
+          "retentionDays"${schemaColumns},
+          "lastRunAt",
+          "nextRunAt",
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, $4, $5${schemaValuePlaceholder}, $7, $8, $9, $10)
+        ON CONFLICT ("id")
+        ${conflictAction}
+        RETURNING
+          "id",
+          "isEnabled",
+          "intervalDays",
+          "runAtTime",
+          "retentionDays",
+          ${schemaSelection},
+          "lastRunAt",
+          "nextRunAt",
+          "createdAt",
+          "updatedAt"
+      `
+      : `
+        INSERT INTO "management"."database_backup_schedule" (
+          "id",
+          "isEnabled",
+          "intervalDays",
+          "runAtTime",
+          "retentionDays",
+          "lastRunAt",
+          "nextRunAt",
+          "createdAt",
+          "updatedAt"
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT ("id")
+        ${conflictAction}
+        RETURNING
+          "id",
+          "isEnabled",
+          "intervalDays",
+          "runAtTime",
+          "retentionDays",
+          ${schemaSelection},
+          "lastRunAt",
+          "nextRunAt",
+          "createdAt",
+          "updatedAt"
+      `;
+
+    return this.prisma.$queryRawUnsafe(sql, ...params);
+  }
+
+  private async hasBackupScheduleSchemaColumn() {
+    if (this.backupScheduleSchemaColumnExists !== null) {
+      return this.backupScheduleSchemaColumnExists;
+    }
+
+    const rows = await this.prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'management'
+          AND table_name = 'database_backup_schedule'
+          AND column_name = 'schemaName'
+      ) AS "exists"
+    `;
+
+    this.backupScheduleSchemaColumnExists = rows[0]?.exists === true;
+    return this.backupScheduleSchemaColumnExists;
+  }
+
+  private async ensureRequiredTable(tableName: string, message: string) {
+    if (await this.tableExists(tableName)) {
+      return;
+    }
+
+    throw new InternalServerErrorException(message);
+  }
+
+  private async tableExists(tableName: string) {
+    const rows = await this.prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = ${this.managementSchema}
+          AND table_name = ${tableName}
+          AND table_type = 'BASE TABLE'
+      ) AS "exists"
+    `;
+
+    return rows[0]?.exists === true;
   }
 
   private parseDatabaseUrl(): ParsedDatabaseUrl & { schema: string } {
@@ -1025,7 +1613,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
 
     const database = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
-    const schema = (parsed.searchParams.get('schema') ?? 'public').trim();
+    const schema = (parsed.searchParams.get('schema') ?? 'management').trim();
 
     if (!database) {
       throw new InternalServerErrorException(
@@ -1065,7 +1653,84 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return process.platform === 'win32' ? 'pg_dump.exe' : 'pg_dump';
   }
 
-  private createGoogleDriveClient() {
+  private getConfiguredGoogleDriveProviders(): GoogleDriveProvider[] {
+    const preferredProvider =
+      process.env.GOOGLE_DRIVE_PROVIDER?.trim().toLowerCase();
+    const providers: GoogleDriveProvider[] = [];
+
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+    const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN?.trim();
+    if (clientId && clientSecret && refreshToken) {
+      providers.push('oauth2');
+    }
+
+    const clientEmail = process.env.GOOGLE_DRIVE_CLIENT_EMAIL?.trim();
+    const privateKey = process.env.GOOGLE_DRIVE_PRIVATE_KEY?.trim();
+    if (clientEmail && privateKey) {
+      providers.push('service-account');
+    }
+
+    if (
+      preferredProvider &&
+      preferredProvider !== 'oauth2' &&
+      preferredProvider !== 'service-account'
+    ) {
+      throw new InternalServerErrorException(
+        'Configura GOOGLE_DRIVE_PROVIDER con uno de estos valores: oauth2 o service-account',
+      );
+    }
+
+    if (preferredProvider) {
+      if (!providers.includes(preferredProvider as GoogleDriveProvider)) {
+        throw new InternalServerErrorException(
+          preferredProvider === 'oauth2'
+            ? 'Configura GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET y GOOGLE_OAUTH_REFRESH_TOKEN para usar GOOGLE_DRIVE_PROVIDER=oauth2'
+            : 'Configura GOOGLE_DRIVE_CLIENT_EMAIL y GOOGLE_DRIVE_PRIVATE_KEY para usar GOOGLE_DRIVE_PROVIDER=service-account',
+        );
+      }
+
+      return [preferredProvider as GoogleDriveProvider];
+    }
+
+    if (providers.length > 0) {
+      return providers;
+    }
+
+    throw new InternalServerErrorException(
+      'Configura GOOGLE_DRIVE_CLIENT_EMAIL y GOOGLE_DRIVE_PRIVATE_KEY o bien GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET y GOOGLE_OAUTH_REFRESH_TOKEN para usar respaldos en Google Drive',
+    );
+  }
+
+  private getGoogleDriveProvider(): GoogleDriveProvider {
+    return this.getConfiguredGoogleDriveProviders()[0];
+  }
+
+  private createGoogleDriveClient(
+    provider: GoogleDriveProvider = this.getGoogleDriveProvider(),
+  ) {
+    if (provider === 'service-account') {
+      const clientEmail = process.env.GOOGLE_DRIVE_CLIENT_EMAIL?.trim();
+      const rawPrivateKey = process.env.GOOGLE_DRIVE_PRIVATE_KEY?.trim();
+
+      if (!clientEmail || !rawPrivateKey) {
+        throw new InternalServerErrorException(
+          'Configura GOOGLE_DRIVE_CLIENT_EMAIL y GOOGLE_DRIVE_PRIVATE_KEY para usar respaldos en Google Drive con service account',
+        );
+      }
+
+      const auth = new google.auth.JWT({
+        email: clientEmail,
+        key: rawPrivateKey.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/drive'],
+      });
+
+      return google.drive({
+        version: 'v3',
+        auth,
+      });
+    }
+
     const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim();
     const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
     const redirectUri =
@@ -1090,6 +1755,52 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async runWithGoogleDriveClient<T>(
+    operationName: string,
+    callback: (client: GoogleDriveClientContext) => Promise<T>,
+  ) {
+    const providers = this.getConfiguredGoogleDriveProviders();
+    let lastError: unknown = null;
+
+    for (let index = 0; index < providers.length; index += 1) {
+      const provider = providers[index];
+
+      try {
+        return await callback({
+          provider,
+          drive: this.createGoogleDriveClient(provider),
+        });
+      } catch (error) {
+        lastError = error;
+        const hasNextProvider = index < providers.length - 1;
+
+        if (
+          hasNextProvider &&
+          this.shouldRetryWithNextGoogleDriveProvider(error)
+        ) {
+          const detail =
+            error instanceof Error && error.message.trim()
+              ? error.message.trim()
+              : 'Error desconocido';
+          this.logger.warn(
+            `Google Drive fallo con ${provider} al ${operationName}. Se intentara el siguiente proveedor configurado. Motivo: ${detail}`,
+          );
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+
+    throw new InternalServerErrorException(
+      `No se pudo ${operationName} en Google Drive`,
+    );
+  }
+
   private getGoogleDriveFolderId() {
     const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID?.trim();
     if (!folderId) {
@@ -1102,21 +1813,25 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async uploadBackupToDrive(fileName: string, content: Buffer) {
-    const drive = this.createGoogleDriveClient();
     const folderId = this.getGoogleDriveFolderId();
 
     try {
-      await drive.files.create({
-        requestBody: {
-          name: fileName,
-          parents: [folderId],
+      await this.runWithGoogleDriveClient(
+        'subir el respaldo',
+        async ({ drive }) => {
+          await drive.files.create({
+            requestBody: {
+              name: fileName,
+              parents: [folderId],
+            },
+            media: {
+              mimeType: 'application/x-tar',
+              body: Readable.from(content),
+            },
+            supportsAllDrives: true,
+          });
         },
-        media: {
-          mimeType: 'application/x-tar',
-          body: Readable.from(content),
-        },
-        supportsAllDrives: true,
-      });
+      );
     } catch (error) {
       throw this.wrapGoogleDriveError(
         error,
@@ -1126,7 +1841,6 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async downloadBackupFromDrive(fileName: string) {
-    const drive = this.createGoogleDriveClient();
     const driveFileId = await this.findDriveFileIdByName(fileName);
     if (!driveFileId) {
       throw new NotFoundException(
@@ -1135,16 +1849,20 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      const response = (await drive.files.get(
-        {
-          fileId: driveFileId,
-          alt: 'media',
-          supportsAllDrives: true,
-        },
-        {
-          responseType: 'stream',
-        },
-      )) as { data: NodeJS.ReadableStream };
+      const response = await this.runWithGoogleDriveClient(
+        `descargar el respaldo ${fileName}`,
+        async ({ drive }) =>
+          (await drive.files.get(
+            {
+              fileId: driveFileId,
+              alt: 'media',
+              supportsAllDrives: true,
+            },
+            {
+              responseType: 'stream',
+            },
+          )) as { data: NodeJS.ReadableStream },
+      );
 
       return await this.readStreamToBuffer(response.data);
     } catch (error) {
@@ -1164,7 +1882,6 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deleteBackupFromDrive(fileName: string) {
-    const drive = this.createGoogleDriveClient();
     const driveFileId = await this.findDriveFileIdByName(fileName, {
       allowMissing: true,
     });
@@ -1174,10 +1891,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await drive.files.delete({
-        fileId: driveFileId,
-        supportsAllDrives: true,
-      });
+      await this.runWithGoogleDriveClient(
+        'eliminar el respaldo',
+        async ({ drive }) => {
+          await drive.files.delete({
+            fileId: driveFileId,
+            supportsAllDrives: true,
+          });
+        },
+      );
     } catch (error) {
       if (this.isGoogleDriveFileMissing(error)) {
         return;
@@ -1246,22 +1968,25 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     fileName: string,
     options?: { allowMissing?: boolean },
   ) {
-    const drive = this.createGoogleDriveClient();
     const folderId = this.getGoogleDriveFolderId();
 
     try {
-      const response = await drive.files.list({
-        q: [
-          `'${folderId}' in parents`,
-          `name = '${this.escapeDriveQueryValue(fileName)}'`,
-          'trashed = false',
-        ].join(' and '),
-        pageSize: 1,
-        fields: 'files(id, name, createdTime)',
-        orderBy: 'createdTime desc',
-        includeItemsFromAllDrives: true,
-        supportsAllDrives: true,
-      });
+      const response = await this.runWithGoogleDriveClient(
+        `ubicar el respaldo ${fileName}`,
+        async ({ drive }) =>
+          drive.files.list({
+            q: [
+              `'${folderId}' in parents`,
+              `name = '${this.escapeDriveQueryValue(fileName)}'`,
+              'trashed = false',
+            ].join(' and '),
+            pageSize: 1,
+            fields: 'files(id, name, createdTime)',
+            orderBy: 'createdTime desc',
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+          }),
+      );
 
       const fileId = response.data.files?.[0]?.id?.trim();
       if (fileId) {
@@ -1291,10 +2016,51 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
+  private normalizeOptionalText(value: unknown) {
+    return typeof value === 'string' ? value.trim() : null;
+  }
+
   private isGoogleDriveFileMissing(error: unknown) {
     return (
       error instanceof NotFoundException ||
       this.extractGoogleDriveStatus(error) === 404
+    );
+  }
+
+  private shouldRetryWithNextGoogleDriveProvider(error: unknown) {
+    const status = this.extractGoogleDriveStatus(error);
+    if (status === 401 || status === 403) {
+      return true;
+    }
+
+    const message = this.extractGoogleDriveErrorMessage(error);
+    if (!message) {
+      return false;
+    }
+
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes('invalid_grant') ||
+      normalized.includes('invalid credentials') ||
+      normalized.includes('unauthorized') ||
+      normalized.includes('insufficient authentication') ||
+      normalized.includes('token has been expired or revoked')
+    );
+  }
+
+  private shouldKeepBackupDeletionLocal(error: unknown) {
+    const status = this.extractGoogleDriveStatus(error);
+    if (status === 401 || status === 403) {
+      return true;
+    }
+
+    const message = this.extractGoogleDriveErrorMessage(error).toLowerCase();
+    return (
+      message.includes('invalid_grant') ||
+      message.includes('invalid credentials') ||
+      message.includes('unauthorized') ||
+      message.includes('insufficient authentication') ||
+      message.includes('token has been expired or revoked')
     );
   }
 
@@ -1310,6 +2076,48 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     };
 
     return candidate.code ?? candidate.status ?? candidate.response?.status;
+  }
+
+  private extractGoogleDriveErrorMessage(error: unknown) {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message.trim();
+    }
+
+    if (!error || typeof error !== 'object') {
+      return '';
+    }
+
+    const candidate = error as {
+      response?: {
+        data?: {
+          error?: string | { message?: string };
+          error_description?: string;
+        };
+      };
+      errors?: Array<{ message?: string }>;
+    };
+
+    const responseError = candidate.response?.data?.error;
+    if (typeof responseError === 'string' && responseError.trim()) {
+      return responseError.trim();
+    }
+
+    const nestedMessage =
+      typeof responseError === 'object' && responseError?.message?.trim()
+        ? responseError.message.trim()
+        : '';
+    if (nestedMessage) {
+      return nestedMessage;
+    }
+
+    const errorDescription =
+      candidate.response?.data?.error_description?.trim();
+    if (errorDescription) {
+      return errorDescription;
+    }
+
+    const arrayMessage = candidate.errors?.[0]?.message?.trim();
+    return arrayMessage || '';
   }
 
   private wrapGoogleDriveError(error: unknown, fallbackMessage: string) {
@@ -1328,6 +2136,25 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   private isSafeIdentifier(value: string) {
     return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+  }
+
+  private parseQualifiedTableName(tableName: string) {
+    const [schema, table] = tableName.split('.');
+
+    if (!schema || !table) {
+      throw new BadRequestException('Nombre de tabla invalido');
+    }
+
+    if (
+      !this.backupSchemas.includes(
+        schema as (typeof this.backupSchemas)[number],
+      ) ||
+      !this.isSafeIdentifier(table)
+    ) {
+      throw new BadRequestException('Nombre de tabla invalido');
+    }
+
+    return { schema, table };
   }
 
   private normalizeSslMode(rawValue: string | null) {
@@ -1357,7 +2184,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return validModes.has(value) ? value : undefined;
   }
 
-  private async runPgDump(tableName?: string): Promise<Buffer> {
+  private async runPgDump(
+    tableName?: string,
+    schemaName?: string,
+  ): Promise<PgDumpResult> {
     const databaseConfig = this.parseDatabaseUrl();
     const pgDumpCommand = this.resolvePgDumpCommand();
     const args = [
@@ -1366,6 +2196,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       '--no-privileges',
       '--encoding=UTF8',
       '--blobs',
+      '--verbose',
       '--host',
       databaseConfig.host,
       '--port',
@@ -1379,10 +2210,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (tableName) {
-      args.push('--table', `${databaseConfig.schema}.${tableName}`);
+      const target = this.parseQualifiedTableName(tableName);
+      args.push('--table', `${target.schema}.${target.table}`);
+    } else if (schemaName) {
+      const normalizedSchemaName = this.normalizeSchemaName(schemaName);
+      args.push('--schema', normalizedSchemaName);
     }
 
-    return new Promise<Buffer>((resolve, reject) => {
+    return new Promise<PgDumpResult>((resolve, reject) => {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
 
@@ -1429,7 +2264,12 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         if (code === 0) {
           const output = Buffer.concat(stdoutChunks);
           if (output.length > 0) {
-            resolve(output);
+            resolve({
+              content: output,
+              verboseLog: this.normalizeProcessLog(
+                Buffer.concat(stderrChunks).toString('utf8'),
+              ),
+            });
             return;
           }
 
@@ -1452,6 +2292,83 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         );
       });
     });
+  }
+
+  private composeBackupExecutionLog({
+    backupType,
+    tableName,
+    schemaName,
+    fileName,
+    sizeBytes,
+    requestedAt,
+    backupCreatedAt,
+    provider,
+    verboseLog,
+    recordId,
+  }: {
+    backupType: 'database' | 'schema' | 'table';
+    tableName?: string;
+    schemaName?: string;
+    fileName: string;
+    sizeBytes: number;
+    requestedAt: Date;
+    backupCreatedAt: string;
+    provider: GoogleDriveProvider;
+    verboseLog: string;
+    recordId: number;
+  }) {
+    const lines = [
+      '===== INICIO BACKUP =====',
+      `Fecha: ${this.formatLogDate(requestedAt)}`,
+      `${this.formatLogStamp(requestedAt)}  Solicitud recibida para ${
+        backupType === 'table' && tableName
+          ? `la tabla ${tableName}`
+          : backupType === 'schema' && schemaName
+            ? `el esquema ${schemaName}`
+            : 'respaldo completo de la base de datos'
+      }`,
+      `${this.formatLogStamp(requestedAt)}  Nombre de archivo previsto: ${fileName}`,
+      `${this.formatLogStamp(requestedAt)}  Ejecutando pg_dump en modo verbose...`,
+    ];
+
+    if (verboseLog) {
+      lines.push(verboseLog);
+    }
+
+    const finishedAt = this.parseOptionalDate(backupCreatedAt) ?? new Date();
+    lines.push(
+      `${this.formatLogStamp(finishedAt)}  Archivo generado: ${fileName}`,
+      `${this.formatLogStamp(finishedAt)}  Tamano final: ${this.formatBytes(sizeBytes)}`,
+      `${this.formatLogStamp(finishedAt)}  Respaldo enviado a Google Drive (${provider})`,
+      `${this.formatLogStamp(finishedAt)}  Registro guardado en historial local con ID ${recordId}`,
+      'RESULTADO: BACKUP EXITOSO',
+      '===== FIN BACKUP =====',
+    );
+
+    return lines.join('\n');
+  }
+
+  private normalizeProcessLog(value: string) {
+    return value
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter(
+        (line, index, all) =>
+          line.length > 0 || (index > 0 && all[index - 1] !== ''),
+      )
+      .join('\n')
+      .trim();
+  }
+
+  private formatLogDate(value: Date) {
+    return value.toLocaleString('es-MX', {
+      hour12: true,
+    });
+  }
+
+  private formatLogStamp(value: Date) {
+    return value.toISOString();
   }
 
   private parseOptionalDate(value: Date | string | null | undefined) {

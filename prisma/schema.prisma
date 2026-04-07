@@ -5,13 +5,15 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DATABASE_DIRECT_URL")
+  schemas   = ["accounts", "catalog", "management", "public"]
 }
 
 model User {
@@ -32,6 +34,7 @@ model User {
   authTokens AuthToken[]
 
   @@map("users")
+  @@schema("accounts")
 }
 
 model Product {
@@ -48,10 +51,26 @@ model Product {
   requiereReceta     Boolean  @default(false)
   activo             Boolean  @default(true)
   createdAt          DateTime @default(now())
+  images             ProductImage[]
   promotions         Promotion[]
   reviews            Review[]
 
   @@map("products")
+  @@schema("catalog")
+}
+
+model ProductImage {
+  id                 Int      @id @default(autoincrement())
+  productId          Int
+  imageUrl           String
+  cloudinaryPublicId String?
+  sortOrder          Int      @default(0)
+  createdAt          DateTime @default(now())
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, sortOrder])
+  @@map("product_images")
+  @@schema("catalog")
 }
 
 model Promotion {
@@ -65,6 +84,7 @@ model Promotion {
   createdAt DateTime @default(now())
 
   @@map("promotions")
+  @@schema("management")
 }
 
 model Brand {
@@ -73,6 +93,7 @@ model Brand {
   createdAt DateTime @default(now())
 
   @@map("brands")
+  @@schema("catalog")
 }
 
 model Classification {
@@ -81,6 +102,7 @@ model Classification {
   createdAt DateTime @default(now())
 
   @@map("classifications")
+  @@schema("catalog")
 }
 
 model Supplier {
@@ -92,6 +114,7 @@ model Supplier {
   createdAt  DateTime @default(now())
 
   @@map("suppliers")
+  @@schema("management")
 }
 
 model Review {
@@ -114,16 +137,20 @@ model Review {
   @@index([productId])
   @@index([userId])
   @@map("reviews")
+  @@schema("management")
 }
 
 model BackupRecord {
   id        Int      @id @default(autoincrement())
   fileName  String   @map("fileName")
+  origin    BackupOrigin @default(MANUAL)
   sizeBytes Int      @map("sizeBytes")
   createdAt DateTime @default(now()) @map("createdAt")
 
   @@index([createdAt])
+  @@index([origin, createdAt])
   @@map("database_backups")
+  @@schema("management")
 }
 
 model BackupSchedule {
@@ -132,12 +159,31 @@ model BackupSchedule {
   intervalDays Int       @default(1) @map("intervalDays")
   runAtTime    String    @default("03:00") @map("runAtTime")
   retentionDays Int      @default(7) @map("retentionDays")
+  schemaName   String?   @map("schemaName")
   lastRunAt    DateTime? @map("lastRunAt")
   nextRunAt    DateTime? @map("nextRunAt")
   createdAt    DateTime  @default(now()) @map("createdAt")
   updatedAt    DateTime  @updatedAt @map("updatedAt")
 
   @@map("database_backup_schedule")
+  @@schema("management")
+}
+
+model MaintenanceSchedule {
+  id           Int       @id @default(1)
+  isEnabled    Boolean   @default(false) @map("isEnabled")
+  intervalDays Int       @default(1) @map("intervalDays")
+  runAtTime    String    @default("04:00") @map("runAtTime")
+  operation    String    @default("VACUUM_ANALYZE")
+  schemaName   String?   @map("schemaName")
+  tableName    String?   @map("tableName")
+  lastRunAt    DateTime? @map("lastRunAt")
+  nextRunAt    DateTime? @map("nextRunAt")
+  createdAt    DateTime  @default(now()) @map("createdAt")
+  updatedAt    DateTime  @updatedAt @map("updatedAt")
+
+  @@map("database_maintenance_schedule")
+  @@schema("management")
 }
 
 model UserSession {
@@ -153,6 +199,7 @@ model UserSession {
   @@index([userId, endedAt, expiresAt])
   @@index([lastSeenAt])
   @@map("user_sessions")
+  @@schema("accounts")
 }
 
 model LoginAttempt {
@@ -167,6 +214,7 @@ model LoginAttempt {
   @@index([attemptedAt])
   @@index([success, attemptedAt])
   @@map("login_attempts")
+  @@schema("accounts")
 }
 
 model AuthToken {
@@ -185,26 +233,43 @@ model AuthToken {
   @@index([userId, purpose, consumedAt, expiresAt])
   @@index([correo, purpose, consumedAt, expiresAt])
   @@map("auth_tokens")
+  @@schema("accounts")
 }
 
 enum Rol {
   ADMIN
   CLIENT
+
+  @@schema("accounts")
 }
 
 enum TipoAdquisicion {
   VENTA
   RENTA
   MIXTO
+
+  @@schema("public")
 }
 
 enum ReviewStatus {
   PENDING
   APPROVED
   REJECTED
+
+  @@schema("public")
 }
 
 enum AuthTokenPurpose {
   EMAIL_VERIFICATION_LINK
   PASSWORD_RESET_CODE
+
+  @@schema("public")
+}
+
+enum BackupOrigin {
+  MANUAL
+  AUTOMATIC
+  TABLE
+
+  @@schema("public")
 }

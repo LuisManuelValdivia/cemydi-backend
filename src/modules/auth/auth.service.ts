@@ -11,7 +11,10 @@ import { createHash, randomBytes, randomInt, randomUUID } from 'crypto';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { AuthUser } from './auth-user.interface';
-import { buildEmailVerificationConfirmUrl, authFlowConstants } from './constants';
+import {
+  buildEmailVerificationConfirmUrl,
+  authFlowConstants,
+} from './constants';
 import { ConfirmPasswordResetDto } from './dto/confirm-password-reset.dto';
 import { EmailActionDto } from './dto/email-action.dto';
 import { LoginDto } from './dto/login.dto';
@@ -142,7 +145,7 @@ export class AuthService {
         reason: 'EMAIL_NOT_VERIFIED',
       });
       throw new UnauthorizedException(
-          'Debes verificar tu correo antes de iniciar sesión',
+        'Debes verificar tu correo antes de iniciar sesión',
       );
     }
 
@@ -239,7 +242,9 @@ export class AuthService {
     });
 
     if (!authToken || authToken.consumedAt || authToken.expiresAt <= now) {
-      throw new BadRequestException('El enlace de verificación es inválido o expiró');
+      throw new BadRequestException(
+        'El enlace de verificación es inválido o expiró',
+      );
     }
 
     await this.prisma.$transaction([
@@ -288,7 +293,8 @@ export class AuthService {
 
     if (!user) {
       return {
-        message: 'Si el correo existe, enviaremos un código para restablecer la contraseña.',
+        message:
+          'Si el correo existe, enviaremos un código para restablecer la contraseña.',
       };
     }
 
@@ -327,7 +333,8 @@ export class AuthService {
     });
 
     return {
-      message: 'Si el correo existe, enviaremos un código para restablecer la contraseña.',
+      message:
+        'Si el correo existe, enviaremos un código para restablecer la contraseña.',
     };
   }
 
@@ -398,7 +405,7 @@ export class AuthService {
 
   async logout(user: AuthUser) {
     if (user.sid) {
-      await this.prisma.userSession.updateMany({
+      await this.prisma.forUser(user).userSession.updateMany({
         where: {
           tokenId: user.sid,
           endedAt: null,
@@ -514,11 +521,16 @@ export class AuthService {
     };
   }
 
-  private async issueEmailVerificationLink(userId: number, correo: string, nombre: string) {
+  private async issueEmailVerificationLink(
+    userId: number,
+    correo: string,
+    nombre: string,
+  ) {
     const rawToken = randomBytes(32).toString('hex');
     const now = new Date();
     const expiresAt = new Date(
-      now.getTime() + authFlowConstants.emailVerificationExpiresMinutes * 60 * 1000,
+      now.getTime() +
+        authFlowConstants.emailVerificationExpiresMinutes * 60 * 1000,
     );
 
     await this.prisma.$transaction([
@@ -581,7 +593,9 @@ export class AuthService {
     }
 
     if (authToken.attemptCount >= authFlowConstants.passwordResetMaxAttempts) {
-      throw new BadRequestException('El código excedió el número de intentos permitidos');
+      throw new BadRequestException(
+        'El código excedió el número de intentos permitidos',
+      );
     }
 
     const codeHash = this.hashValue(codigo);
@@ -624,7 +638,7 @@ export class AuthService {
     } catch (error) {
       if (this.isMissingTrackingTableError(error)) {
         this.logger.warn(
-        'No se pudo registrar el intento de login porque faltan tablas de auditoría. Ejecuta la migración auth_security_tracking.',
+          'No se pudo registrar el intento de login porque faltan tablas de auditoría. Ejecuta la migración auth_security_tracking.',
         );
         return;
       }
@@ -667,7 +681,7 @@ export class AuthService {
     } catch (error) {
       if (this.isMissingTrackingTableError(error)) {
         this.logger.warn(
-        'El login continuó sin guardar sesión/auditoría porque faltan tablas de monitoreo. Ejecuta la migración auth_security_tracking.',
+          'El login continuó sin guardar sesión/auditoría porque faltan tablas de monitoreo. Ejecuta la migración auth_security_tracking.',
         );
         return;
       }
@@ -702,5 +716,4 @@ export class AuthService {
         typeof (value as { exp?: unknown }).exp === 'number')
     );
   }
-
 }

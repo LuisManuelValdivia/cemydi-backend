@@ -1,4 +1,8 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import nodemailer, { type Transporter } from 'nodemailer';
 import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 import dns from 'node:dns';
@@ -19,7 +23,8 @@ export class MailService {
     const port = Number(process.env.SMTP_PORT ?? '587');
     const user = process.env.SMTP_USER?.trim();
     const pass = process.env.SMTP_PASS?.trim();
-    const secure = `${process.env.SMTP_SECURE ?? ''}`.trim().toLowerCase() === 'true';
+    const secure =
+      `${process.env.SMTP_SECURE ?? ''}`.trim().toLowerCase() === 'true';
 
     if (!host || !user || !pass || Number.isNaN(port)) {
       throw new InternalServerErrorException(
@@ -39,26 +44,32 @@ export class MailService {
         servername: host,
       },
       getSocket: (options, callback) => {
-        dns.lookup(options.host ?? host, { family: 4 }, (lookupError, address) => {
-          if (lookupError) {
-            callback(lookupError, false);
-            return;
-          }
+        dns.lookup(
+          options.host ?? host,
+          { family: 4 },
+          (lookupError, address) => {
+            if (lookupError) {
+              callback(lookupError, false);
+              return;
+            }
 
-          const socket = options.secure
-            ? tls.connect({
-                host: address,
-                port: options.port ?? port,
-                servername: options.host ?? host,
-              })
-            : net.connect({
-                host: address,
-                port: options.port ?? port,
-              });
+            const socket = options.secure
+              ? tls.connect({
+                  host: address,
+                  port: options.port ?? port,
+                  servername: options.host ?? host,
+                })
+              : net.connect({
+                  host: address,
+                  port: options.port ?? port,
+                });
 
-          socket.once('error', (socketError) => callback(socketError, false));
-          socket.once('connect', () => callback(null, { connection: socket }));
-        });
+            socket.once('error', (socketError) => callback(socketError, false));
+            socket.once('connect', () =>
+              callback(null, { connection: socket }),
+            );
+          },
+        );
       },
     };
 
@@ -68,10 +79,18 @@ export class MailService {
   }
 
   private getFromAddress() {
-    return process.env.MAIL_FROM?.trim() || process.env.SMTP_USER?.trim() || 'no-reply@cemydi.local';
+    return (
+      process.env.MAIL_FROM?.trim() ||
+      process.env.SMTP_USER?.trim() ||
+      'no-reply@cemydi.local'
+    );
   }
 
-  async sendEmailVerificationLink(input: { correo: string; nombre: string; verificationUrl: string }) {
+  async sendEmailVerificationLink(input: {
+    correo: string;
+    nombre: string;
+    verificationUrl: string;
+  }) {
     await this.sendMail({
       to: input.correo,
       subject: 'Verifica tu cuenta de CEMYDI',
@@ -96,7 +115,11 @@ export class MailService {
     });
   }
 
-  async sendPasswordResetCode(input: { correo: string; nombre: string; code: string }) {
+  async sendPasswordResetCode(input: {
+    correo: string;
+    nombre: string;
+    code: string;
+  }) {
     await this.sendMail({
       to: input.correo,
       subject: 'Código para restablecer tu contraseña en CEMYDI',
@@ -112,22 +135,29 @@ export class MailService {
     });
   }
 
-  private async sendMail(input: { to: string; subject: string; html: string; text: string }) {
+  private async sendMail(input: {
+    to: string;
+    subject: string;
+    html: string;
+    text: string;
+  }) {
     const transporter = this.getTransporter();
     try {
-      const result = await transporter.sendMail({
+      const result = (await transporter.sendMail({
         from: this.getFromAddress(),
         to: input.to,
         subject: input.subject,
         html: input.html,
         text: input.text,
-      });
+      })) as SMTPTransport.SentMessageInfo;
+      const accepted = this.formatRecipientList(result.accepted);
+      const rejected = this.formatRecipientList(result.rejected);
       this.logger.log(
-        `Correo enviado a ${input.to}. messageId=${result.messageId ?? 'N/A'} accepted=${result.accepted?.join(',') || 'N/A'} rejected=${result.rejected?.join(',') || 'N/A'}`,
+        `Correo enviado a ${input.to}. messageId=${result.messageId ?? 'N/A'} accepted=${accepted || 'N/A'} rejected=${rejected || 'N/A'}`,
       );
 
       if (Array.isArray(result.rejected) && result.rejected.length > 0) {
-        throw new Error(`Destinatarios rechazados: ${result.rejected.join(', ')}`);
+        throw new Error(`Destinatarios rechazados: ${rejected || 'N/A'}`);
       }
     } catch (error) {
       const smtpError = error as {
@@ -153,5 +183,20 @@ export class MailService {
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
+  }
+
+  private formatRecipientList(
+    recipients: SMTPTransport.SentMessageInfo['accepted'],
+  ) {
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return '';
+    }
+
+    return recipients
+      .map((recipient) =>
+        typeof recipient === 'string' ? recipient : recipient.address,
+      )
+      .filter((recipient): recipient is string => Boolean(recipient?.trim()))
+      .join(', ');
   }
 }

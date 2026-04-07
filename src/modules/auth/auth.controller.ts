@@ -10,7 +10,6 @@ import {
 } from '@nestjs/common';
 import { Rol } from '@prisma/client';
 import type { Request, Response } from 'express';
-import { ExtractJwt } from 'passport-jwt';
 import { AuthService } from './auth.service';
 import type { AuthUser } from './auth-user.interface';
 import {
@@ -36,11 +35,23 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   private extractAccessToken(req: Request): string | null {
-    const fromCookie = req.cookies?.[AUTH_ACCESS_COOKIE];
+    const cookies = req.cookies as Record<string, unknown> | undefined;
+    const fromCookie = cookies?.[AUTH_ACCESS_COOKIE];
     if (typeof fromCookie === 'string' && fromCookie.trim()) {
       return fromCookie.trim();
     }
-    return ExtractJwt.fromAuthHeaderAsBearerToken()(req) ?? null;
+
+    const authorizationHeader = req.headers.authorization;
+    if (typeof authorizationHeader !== 'string') {
+      return null;
+    }
+
+    const [scheme, token] = authorizationHeader.trim().split(/\s+/, 2);
+    if (!scheme || !token || scheme.toLowerCase() !== 'bearer') {
+      return null;
+    }
+
+    return token.trim() || null;
   }
 
   @Post('register')
