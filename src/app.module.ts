@@ -13,6 +13,7 @@ import { SuppliersModule } from './modules/suppliers/suppliers.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
 import { BackupsModule } from './modules/backups/backups.module';
+import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { BackupsModule } from './modules/backups/backups.module';
     PromotionsModule,
     ReviewsModule,
     BackupsModule,
+    MaintenanceModule,
   ],
   controllers: [AppController],
   providers: [

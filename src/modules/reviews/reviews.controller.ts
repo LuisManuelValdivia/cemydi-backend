@@ -63,7 +63,10 @@ export class ReviewsController {
   @Patch(':id/approve')
   @Roles(Rol.ADMIN)
   @UseGuards(JwtAuthGuard, RolesGuard)
-  approve(@CurrentUser() user: AuthUser, @Param('id', ParseIntPipe) id: number) {
+  approve(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     return this.reviewsService.approve(user, id);
   }
 

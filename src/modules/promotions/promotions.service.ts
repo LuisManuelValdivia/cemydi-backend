@@ -20,6 +20,7 @@ export class PromotionsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(params: FindPromotionsParams) {
+    const db = this.prisma.forUser(params.user);
     const where: Prisma.PromotionWhereInput = {};
 
     if (params.includeExpired) {
@@ -34,7 +35,7 @@ export class PromotionsService {
       };
     }
 
-    const promotions = await this.prisma.promotion.findMany({
+    const promotions = await db.promotion.findMany({
       where,
       include: {
         product: {

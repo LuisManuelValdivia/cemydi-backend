@@ -93,10 +93,25 @@ export class CatalogsService {
     }
 
     try {
-      const classification = await this.prisma.classification.update({
-        where: { id },
-        data: { nombre: dto.nombre.trim() },
+      const previousName = existing.nombre.trim();
+      const nextName = dto.nombre.trim();
+
+      const classification = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.classification.update({
+          where: { id },
+          data: { nombre: nextName },
+        });
+
+        if (previousName !== nextName) {
+          await tx.product.updateMany({
+            where: { clasificacion: previousName },
+            data: { clasificacion: nextName },
+          });
+        }
+
+        return updated;
       });
+
       return {
         message: 'Clasificacion actualizada correctamente',
         classification,

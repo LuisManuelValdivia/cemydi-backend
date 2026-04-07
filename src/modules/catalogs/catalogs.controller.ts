@@ -43,6 +43,14 @@ export class CatalogsController {
     return this.catalogsService.updateBrand(id, dto);
   }
 
+  @Post('brands/:id/update')
+  updateBrandViaPost(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCatalogItemDto,
+  ) {
+    return this.catalogsService.updateBrand(id, dto);
+  }
+
   @Delete('brands/:id')
   deleteBrand(@Param('id', ParseIntPipe) id: number) {
     return this.catalogsService.deleteBrand(id);
@@ -55,6 +63,14 @@ export class CatalogsController {
 
   @Patch('classifications/:id')
   updateClassification(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: CreateCatalogItemDto,
+  ) {
+    return this.catalogsService.updateClassification(id, dto);
+  }
+
+  @Post('classifications/:id/update')
+  updateClassificationViaPost(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: CreateCatalogItemDto,
   ) {

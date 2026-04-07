@@ -1,0 +1,12 @@
+{
+  "id": 1,
+  "isEnabled": false,
+  "intervalDays": 1,
+  "runAtTime": "04:00",
+  "operation": "VACUUM_ANALYZE",
+  "tableName": null,
+  "lastRunAt": null,
+  "nextRunAt": "2026-03-28T10:00:00.000Z",
+  "createdAt": "2026-03-27T17:44:06.664Z",
+  "updatedAt": "2026-03-27T17:44:07.430Z"
+}

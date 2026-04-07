@@ -36,7 +36,10 @@ function isSecureRequest(req?: Request) {
     : forwardedProto;
 
   if (typeof forwardedProtoValue === 'string') {
-    const normalizedProto = forwardedProtoValue.split(',')[0]?.trim().toLowerCase();
+    const normalizedProto = forwardedProtoValue
+      .split(',')[0]
+      ?.trim()
+      .toLowerCase();
     if (normalizedProto === 'https') {
       return true;
     }
@@ -87,10 +90,9 @@ function shouldUseSecureCookies(req?: Request) {
   });
 }
 
-function authCookieBase(req?: Request): Pick<
-  CookieOptions,
-  'httpOnly' | 'secure' | 'sameSite' | 'path'
-> {
+function authCookieBase(
+  req?: Request,
+): Pick<CookieOptions, 'httpOnly' | 'secure' | 'sameSite' | 'path'> {
   const secureCookies = shouldUseSecureCookies(req);
 
   return {
@@ -101,7 +103,10 @@ function authCookieBase(req?: Request): Pick<
   };
 }
 
-export function buildAuthCookieSetOptions(maxAgeMs: number, req?: Request): CookieOptions {
+export function buildAuthCookieSetOptions(
+  maxAgeMs: number,
+  req?: Request,
+): CookieOptions {
   return { ...authCookieBase(req), maxAge: maxAgeMs };
 }
 
@@ -127,7 +132,9 @@ export const authFlowConstants = {
   passwordResetExpiresMinutes: Number(
     process.env.PASSWORD_RESET_EXPIRES_MINUTES ?? '15',
   ),
-  passwordResetMaxAttempts: Number(process.env.PASSWORD_RESET_MAX_ATTEMPTS ?? '5'),
+  passwordResetMaxAttempts: Number(
+    process.env.PASSWORD_RESET_MAX_ATTEMPTS ?? '5',
+  ),
 } as const;
 
 export function buildFrontendLoginUrl(params?: Record<string, string>) {
@@ -143,7 +150,10 @@ export function buildFrontendLoginUrl(params?: Record<string, string>) {
 }
 
 export function buildEmailVerificationConfirmUrl(token: string) {
-  const url = new URL('/auth/email-verification/confirm', authFlowConstants.backendUrl);
+  const url = new URL(
+    '/auth/email-verification/confirm',
+    authFlowConstants.backendUrl,
+  );
   url.searchParams.set('token', token);
   return url.toString();
 }

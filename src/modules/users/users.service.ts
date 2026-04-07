@@ -16,7 +16,7 @@ export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getMe(user: AuthUser) {
-    const currentUser = await this.prisma.user.findUnique({
+    const currentUser = await this.prisma.forUser(user).user.findUnique({
       where: { id: user.sub },
       select: {
         id: true,
@@ -38,6 +38,7 @@ export class UsersService {
   }
 
   async updateMe(user: AuthUser, dto: UpdateProfileDto) {
+    const db = this.prisma.forUser(user);
     const data: Prisma.UserUpdateInput = {};
 
     if (dto.nombre !== undefined) data.nombre = dto.nombre.trim();
@@ -52,7 +53,7 @@ export class UsersService {
       throw new BadRequestException('No hay campos para actualizar');
     }
 
-    const updatedUser = await this.updateUserRecord(user.sub, data);
+    const updatedUser = await this.updateUserRecord(db, user.sub, data);
 
     return {
       message: 'Perfil actualizado correctamente',
@@ -108,11 +109,7 @@ export class UsersService {
     };
   }
 
-  async update(
-    currentUser: AuthUser,
-    id: number,
-    dto: UpdateUserDto,
-  ) {
+  async update(currentUser: AuthUser, id: number, dto: UpdateUserDto) {
     const data: Prisma.UserUpdateInput = {};
 
     if (dto.nombre !== undefined) data.nombre = dto.nombre.trim();
@@ -135,7 +132,11 @@ export class UsersService {
       throw new BadRequestException('No hay campos para actualizar');
     }
 
-    const updatedUser = await this.updateUserRecord(id, data);
+    const updatedUser = await this.updateUserRecord(
+      this.prisma.asAdmin(),
+      id,
+      data,
+    );
 
     return {
       message: 'Usuario actualizado correctamente',
@@ -165,9 +166,13 @@ export class UsersService {
     }
   }
 
-  private async updateUserRecord(id: number, data: Prisma.UserUpdateInput) {
+  private async updateUserRecord(
+    db: ReturnType<PrismaService['asAdmin']>,
+    id: number,
+    data: Prisma.UserUpdateInput,
+  ) {
     try {
-      return await this.prisma.user.update({
+      return await db.user.update({
         where: { id },
         data,
       });

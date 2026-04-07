@@ -43,14 +43,24 @@ $ npm install
    - `JWT_EXPIRES_IN`
    - `PORT`
    - `CORS_ORIGIN` (single URL or comma-separated list)
-5. Configure backup storage in Google Drive with OAuth 2.0:
+5. Configure backup storage in Google Drive:
+   - `GOOGLE_DRIVE_PROVIDER` (`oauth2` or `service-account`)
    - `GOOGLE_DRIVE_FOLDER_ID`
-   - `GOOGLE_OAUTH_CLIENT_ID`
-   - `GOOGLE_OAUTH_CLIENT_SECRET`
-   - `GOOGLE_OAUTH_REDIRECT_URI`
-   - `GOOGLE_OAUTH_REFRESH_TOKEN`
+   - If `GOOGLE_DRIVE_PROVIDER=oauth2`:
+     `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+     `GOOGLE_OAUTH_REDIRECT_URI`, `GOOGLE_OAUTH_REFRESH_TOKEN`
+   - If `GOOGLE_DRIVE_PROVIDER=service-account`:
+     `GOOGLE_DRIVE_CLIENT_EMAIL`, `GOOGLE_DRIVE_PRIVATE_KEY`
 
 Use `npm run drive:oauth:url` to generate the consent URL and `npm run drive:oauth:token -- YOUR_AUTHORIZATION_CODE` to exchange the authorization code for tokens. Store the returned `refresh_token` in `.env` and share the destination folder with the same Google account that completed the consent flow.
+
+If you use `service-account`, store backups in a Shared Drive or in a folder explicitly shared with the service account. Avoid configuring both providers for the same destination unless you intentionally want fallback behavior between different identities.
+
+6. Configure product images in Cloudinary:
+   - `CLOUDINARY_URL`
+   - `CLOUDINARY_PRODUCTS_FOLDER` (optional)
+
+Products accept multiple images. Admin can upload files from the computer or provide remote image URLs, and CSV import supports an `ImageUrls` column with URLs separated by `|`.
 
 Prisma reads both values directly from `.env`:
 

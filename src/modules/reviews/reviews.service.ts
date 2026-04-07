@@ -14,7 +14,7 @@ export class ReviewsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async listApprovedByProduct(productId: number) {
-    const reviews = await this.prisma.review.findMany({
+    const reviews = await this.prisma.asReader().review.findMany({
       where: {
         productId,
         status: ReviewStatus.APPROVED,
@@ -50,7 +50,9 @@ export class ReviewsService {
   }
 
   async submit(currentUser: AuthUser, dto: CreateReviewDto) {
-    const user = await this.prisma.user.findUnique({
+    const db = this.prisma.forUser(currentUser);
+
+    const user = await db.user.findUnique({
       where: { id: currentUser.sub },
       select: { id: true, activo: true },
     });
@@ -59,7 +61,7 @@ export class ReviewsService {
       throw new UnauthorizedException('No autenticado');
     }
 
-    const product = await this.prisma.product.findUnique({
+    const product = await db.product.findUnique({
       where: { id: dto.productId },
       select: { id: true, activo: true },
     });
@@ -68,7 +70,7 @@ export class ReviewsService {
       throw new NotFoundException('Producto no encontrado');
     }
 
-    const existingReview = await this.prisma.review.findUnique({
+    const existingReview = await db.review.findUnique({
       where: {
         userId_productId: {
           userId: currentUser.sub,
@@ -86,7 +88,7 @@ export class ReviewsService {
       ratingToPersist >= 4 ? ReviewStatus.APPROVED : ReviewStatus.REJECTED;
     const approvedAt = status === ReviewStatus.APPROVED ? new Date() : null;
 
-    const review = await this.prisma.review.upsert({
+    const review = await db.review.upsert({
       where: {
         userId_productId: {
           userId: currentUser.sub,
@@ -121,7 +123,7 @@ export class ReviewsService {
   }
 
   async getMyByProduct(currentUser: AuthUser, productId: number) {
-    const review = await this.prisma.review.findUnique({
+    const review = await this.prisma.forUser(currentUser).review.findUnique({
       where: {
         userId_productId: {
           userId: currentUser.sub,
