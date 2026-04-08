@@ -50,10 +50,7 @@ export class PromotionsController {
   @Patch(':id')
   @Roles(Rol.ADMIN)
   @UseGuards(JwtAuthGuard, RolesGuard)
-  update(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: UpdatePromotionDto,
-  ) {
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdatePromotionDto) {
     return this.promotionsService.update(id, dto);
   }
 
