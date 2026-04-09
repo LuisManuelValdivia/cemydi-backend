@@ -71,7 +71,7 @@ export class AuthController {
       result.accessToken,
       buildAuthCookieSetOptions(result.cookieMaxAgeMs, req),
     );
-    return { user: result.user, accessToken: result.accessToken };
+    return { user: result.user };
   }
 
   @Post('email-verification/send')
